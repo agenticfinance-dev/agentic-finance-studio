@@ -132,9 +132,13 @@ To evolve Agentic Finance Studio into a fully autonomous trading assistant that:
 
 For optimal performance, please allow 5–10 seconds between commands.
 Agentic Finance Studio uses a tiered data architecture to ensure reliability and continuous uptime:
+
 Primary: SoSoValue (Institutional sentiment and market intelligence)
+
 Secondary: CoinGecko (Global price data fallback)
+
 Tertiary: Binance (Market data redundancy and failover)
+
 This design ensures that even if one data source is temporarily unavailable or rate-limited, the system continues to deliver accurate and timely results.
 
 ⚠️ Disclaimer
