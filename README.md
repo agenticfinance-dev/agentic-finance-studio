@@ -44,7 +44,6 @@ The system is built on a decoupled three-tier architecture:
 
 📦 Installation & Setup
 
-```bash  
 git clone https://github.com/fxscalpersignals/agentic-finance-studio.git  
 cd agentic-finance-studio  
 pip install -r requirements.txt  
