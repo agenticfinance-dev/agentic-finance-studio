@@ -1,153 +1,95 @@
-Agentic Finance Studio 🚀
+🚀 Agentic Finance Studio
 
 Institutional Sentiment → Actionable Crypto Signals
 
-Agentic Finance Studio is an AI-powered Telegram bot that helps traders turn market sentiment into clear, actionable insights.
-
-Instead of reacting to noise, the bot delivers structured intelligence for assets like BTC and XRP, combining sentiment data, price tracking, and smart alerts.
+Agentic Finance Studio is an AI-powered Telegram bot that helps traders turn market sentiment into clear, actionable insights.  
+Instead of reacting to noise, the bot delivers structured intelligence for assets like BTC, ETH, XRP, and SOL — combining price tracking and smart signals.
 
 🎯 Project Vision
 
-Retail traders often struggle with:
-
-- Information overload
-- Late entries
+Retail traders often struggle with:  
+- Information overload  
+- Late entries  
 - Lack of clear signals
 
-Agentic Finance Studio solves this by combining:
+Agentic Finance Studio solves this by combining:  
+- Institutional Sentiment from SoSoValue  
+- Market Data Intelligence with multi-source pricing  
+- Actionable Alerts delivered in real-time via Telegram
 
-1. Institutional Sentiment
-   Data from SoSoValue (when available)
+🏗️ Modular Architecture
 
-2. Market Data Intelligence
-   Multi-source pricing (SoSoValue → CoinGecko → Binance)
+The system is built on a decoupled three-tier architecture:
 
-3. Actionable Alerts
-   Simple insights delivered via Telegram in real-time
-   
-🏗️ Modular Architecture (The Stack)
+1. Intelligence Layer — SoSoValue API for institutional data and pricing  
+2. Signal Engine — Asynchronous Python for fast technical analysis and whale monitoring  
+3. Delivery Layer — Clean, mobile-first Telegram interface
 
-To ensure high availability and professional-grade performance, the studio is built on a decoupled, three-tier stack:
- 1. Intelligence Layer: Utilizes the SoSoValue API for real-time institutional sentiment indices and news filtering.
- 2. Signal Engine: Powered by Asynchronous Python for non-blocking technical analysis (Quant TA) and institutional Whale Alert monitoring.
- 3. Execution Layer: Integrated
-   
-🛠️ Tech Stack
+🛠️ Tech Stack  
+- Backend: Python (Asynchronous)  
+- Framework: python-telegram-bot  
+- Hosting: JustRunMy.app (24/7)  
+- Primary API: SoSoValue  
+- Fallbacks: CoinGecko + Binance  
+- Security: Environment variables only
 
-- Backend: Python (Async)
-- Bot Framework: python-telegram-bot
-- Hosting: JustRunMy.App
-- APIs:
-  - SoSoValue (primary)
-  - CoinGecko (fallback)
-  - Binance (backup)
-- Security:
-  - Environment variables ("TELEGRAM_TOKEN", "SOSO_API_KEY")
-  - No hardcoded credentials
+🚀 Key Features (Wave 1)
 
-🚀 Features
+- Real-time price tracking for BTC, ETH, XRP, and SOL  
+- Smart Signal Engine with Entry, TP, and SL levels  
+- Whale Activity Reports  
+- Sector Intelligence Overview  
+- Background Smart Alerts  
+- Robust multi-API fallback system
 
-- 📊 Live Price Tracking
-  BTC, ETH, XRP, SOL via simple commands
+📦 Installation & Setup
 
-- 🔁 Multi-API Fallback System
-  Ensures price data is always available
-
-- 🐳 Whale Alerts (MVP)
-  XRP/BTC movement detection (expandable)
-
-- ⚡ Fast Telegram Interface
-  Clean and instant responses
-
-📦 Installation
-# Clone the repository
-git clone https://github.com/fxscalpersignals/agentic-finance-studio.git
-
-# Enter the directory
-cd agentic-finance-studio
-
-# Install dependencies
-pip install -r requirements.txt
-
-
-🔐 Environment Variables
-
-Set these in your hosting platform or ".env" file:
-
-TELEGRAM_TOKEN=your_telegram_bot_token
-SOSO_API_KEY=your_sosovalue_api_key
-
-▶️ Run the Bot
-
+```bash  
+git clone https://github.com/fxscalpersignals/agentic-finance-studio.git  
+cd agentic-finance-studio  
+pip install -r requirements.txt  
 python main.py
 
-💬 Telegram Commands
+Environment Variables:
 
-/start        - Show menu
-/test         - Check bot status
-/btc          - Bitcoin price
-/eth          - Ethereum price
-/xrp          - XRP price
-/sol          - Solana price
-/price <sym>  - Custom coin
-/whale        - Whale alert (MVP)
+TELEGRAM_TOKEN=your_telegram_bot_token  
+SOSO_API_KEY=your_sosovalue_api_key
 
-📈 Roadmap: The 3 Waves
+Roadmap: The 3 Waves
 
-🌊 Wave 1: The Foundation (Active)
+🌊 Wave 1: The Foundation (Completed)
 
-Goal: Deploy a functional, real-time signal engine for a "One-Person Finance Business."
-- Core Engine: Asynchronous Python Telegram bot running 24/7 on JustRunMy.App
-- Market Data: Live price tracking with multi-API fallback (SoSoValue → CoinGecko → Binance)
-- Assets Covered: BTC, XRP, SOL
-- Whale Monitoring (MVP): Price-action-based detection of abnormal movements (expandable to on-chain tracking)
-- Security: Environment Variables for all API keys (no hardcoded secrets)
+• Asynchronous Telegram bot running 24/7  
+• Multi-source price engine (SoSoValue Primary → CoinGecko → Binance)  
+• Assets: BTC, ETH, XRP, SOL  
+• Whale Monitoring (MVP)  
+• Secure environment-based configuration
 
-🌊 Wave 2: Institutional Intelligence
+🌊 Wave 2: Institutional Intelligence (In Progress)
 
-Goal: Integrate SoSoValue data to enable sentiment-driven trading insights.
-- SSI Integration: Real-time SoSoValue Sentiment Index (Fear vs Greed layer)
-- Sector Intelligence: Monitoring sectors like PayFi, AI, and RWA via SoSoValue indices
-- Signal Layer: Combine sentiment + price action to generate Entry, TP, and SL signals
-- Smart Alerts: Automated Telegram notifications (no command required)
+• SSI Integration (SoSoValue Sentiment Index)  
+• Sector Intelligence (AI Agents, PayFi, RWA)  
+• Advanced Signal Engine (Sentiment + Price Action)  
+• Smart Alerts (automated)
 
-🌊 Wave 3: The Execution Layer (Final Goal)
+🌊 Wave 3: The Execution Layer (Future Goal)
 
-Goal: Enable seamless transition from signal → execution using SoDEX.
-- On-Chain Trading: Direct trade execution via SoDEX SDK
-- Yield Intelligence: Alerts for opportunities like USSI and MAG7.ssi
-- Automation: End-to-end pipeline (Signal → Decision → Execution)
-- Monetization: Telegram Stars integration for premium features
+• On-chain trading via SoDEX SDK  
+• Yield Intelligence alerts  
+• Full automation pipeline  
+• Monetization via Telegram Stars
 
-🧠 Long-Term Vision
-
-To evolve Agentic Finance Studio into a fully autonomous trading assistant that:
-- Understands market sentiment
-- Generates high-probability signals
-- Executes trades non-custodially
-- Operates as a personal financial agent
-
-  
-⚙️ Testing Instructions
-
-For optimal performance, please allow 5–10 seconds between commands.
-Agentic Finance Studio uses a tiered data architecture to ensure reliability and continuous uptime:
-
-Primary: SoSoValue (Institutional sentiment and market intelligence)
-
-Secondary: CoinGecko (Global price data fallback)
-
-Tertiary: Binance (Market data redundancy and failover)
-
-This design ensures that even if one data source is temporarily unavailable or rate-limited, the system continues to deliver accurate and timely results.
+⚙️ Testing Instructions  
+Allow 5–10 seconds between commands for best performance.  
+The bot uses a tiered fallback system to ensure reliability.
 
 ⚠️ Disclaimer
 
-This project is for educational purposes only.
-Not financial advice.
+This project is for educational and demonstration purposes only.  
+Not financial advice. Trade at your own risk.
 
-🤝 Links
+Live Bot: https://t.me/AgenticFinanceBot  
+Demo Video: https://www.youtube.com/watch?v=fZ1xpd7vbG8  
+GitHub: https://github.com/fxscalpersignals/agentic-finance-studio
 
-- Telegram Bot: https://t.me/AgenticFinanceBot
-- Developer: fxscalpersignals
-- Buildathon: SoSoValue & SoDEX
+Built by fxscalpersignals (Solo Developer) for the SoSoValue Buildathon.
