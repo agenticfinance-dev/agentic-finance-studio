@@ -181,7 +181,7 @@ async def get_rsi(session, symbol):
         logging.error(f"RSI error {symbol}: {e}")
         return None
 
-# ================= SIGNAL GENERATION =================
+# ================= SIGNAL WITH PULLBACK =================
 async def generate_signal(session, symbol):
     data = await get_cached_price(session, symbol)
     if data["price"] is None:
@@ -291,18 +291,18 @@ async def get_intelligence_feed(session):
                 strongest = symbol.upper()
     avg = total / count if count > 0 else 0
 
-    # Real SSI + Fallback
+    # Real SSI First
     try:
         data = await fetch_with_retry(session, "https://api.alternative.me/fng/")
         if data and data.get("data"):
             ssi = int(data["data"][0]["value"])
             mood = data["data"][0]["value_classification"]
         else:
-            ssi = max(0, min(100, round(50 + (avg * 6))))
-            mood = "Extreme Greed" if ssi >= 75 else "Greed" if ssi >= 60 else "Neutral" if ssi >= 40 else "Fear" if ssi >= 25 else "Extreme Fear"
+            ssi = max(0, min(100, round(50 + (avg * 7))))
+            mood = "Extreme Greed" if ssi >= 80 else "Greed" if ssi >= 65 else "Neutral" if ssi >= 45 else "Fear" if ssi >= 25 else "Extreme Fear"
     except:
-        ssi = max(0, min(100, round(50 + (avg * 6))))
-        mood = "Extreme Greed" if ssi >= 75 else "Greed" if ssi >= 60 else "Neutral" if ssi >= 40 else "Fear" if ssi >= 25 else "Extreme Fear"
+        ssi = max(0, min(100, round(50 + (avg * 7))))
+        mood = "Extreme Greed" if ssi >= 80 else "Greed" if ssi >= 65 else "Neutral" if ssi >= 45 else "Fear" if ssi >= 25 else "Extreme Fear"
 
     return f"🧠 **Market Intelligence Feed**\n\n" \
            f"**SSI Score**: {ssi}/100\n" \
