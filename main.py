@@ -274,7 +274,7 @@ async def generate_signal(session, symbol):
     performance_log[symbol].append(signal)
     return signal
 
-# ================= FEATURES =================
+# ================= IMPROVED SECTOR MAP =================
 async def get_sector_map(session):
     sector_data = {}
     for sector, coins in SECTORS.items():
@@ -285,6 +285,10 @@ async def get_sector_map(session):
                 changes.append(data["change"])
         avg = sum(changes) / len(changes) if changes else 0
         sector_data[sector] = avg
+    
+    if not sector_data:
+        return "📈 **Sector Intelligence Map**\n\n⚠️ Data temporarily unavailable."
+    
     strongest = max(sector_data, key=sector_data.get)
     msg = "📈 **Sector Intelligence Map**\n\n"
     for sector, avg in sector_data.items():
