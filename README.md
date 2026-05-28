@@ -23,7 +23,7 @@ The system is built on a decoupled three-tier architecture:
 
 1. Intelligence Layer — SoSoValue API for institutional data and pricing  
 2. Signal Engine — Asynchronous Python for fast technical analysis and whale monitoring  
-3. Delivery Layer — Clean, mobile-first Telegram interface
+3. Delivery Layer — Clean, mobile-first Telegram interface with full button navigation
 
 🛠️ Tech Stack  
 - Backend: Python (Asynchronous)  
@@ -53,6 +53,7 @@ Environment Variables:
 
 TELEGRAM_TOKEN=your_telegram_bot_token  
 SOSO_API_KEY=your_sosovalue_api_key
+CHAT_ID=your_telegram_chat_id for auto scanner alerts
 
 Roadmap: The 3 Waves
 
@@ -64,7 +65,20 @@ Roadmap: The 3 Waves
 • Whale Monitoring (MVP)  
 • Secure environment-based configuration
 
-🌊 Wave 2: Institutional Intelligence (In Progress)
+🚀 Key Features (Wave 2)
+
+- Real-time ATR-based signals with intelligent pullback entries, TP & SL
+- EMA trend filtering (EMA20/EMA50)
+- Live Sector Intelligence Map (AI, PAYFI, RWA, DEFI)
+- Whale Radar for extreme momentum detection
+- ETF Flow Intelligence & institutional rotation analysis
+- Dynamic SSI (Sentiment Index) with fallback
+- Fully button-driven Telegram interface
+- Production-ready: Global Session, Cooldown, Graceful Shutdown, Safe Rate Limiting
+- Paper Trading Portfolio with PnL tracking
+- Auto Scanner with smart alerts
+- 
+🌊 Wave 2: Institutional Intelligence (Completed)
 
 • SSI Integration (SoSoValue Sentiment Index)  
 • Sector Intelligence (AI Agents, PayFi, RWA)  
