@@ -53,6 +53,7 @@ Environment Variables:
 
 TELEGRAM_TOKEN=your_telegram_bot_token  
 SOSO_API_KEY=your_sosovalue_api_key
+
 CHAT_ID=your_telegram_chat_id for auto scanner alerts
 
 Roadmap: The 3 Waves
@@ -77,7 +78,7 @@ Roadmap: The 3 Waves
 - Production-ready: Global Session, Cooldown, Graceful Shutdown, Safe Rate Limiting
 - Paper Trading Portfolio with PnL tracking
 - Auto Scanner with smart alerts
-- 
+  
 🌊 Wave 2: Institutional Intelligence (Completed)
 
 • SSI Integration (SoSoValue Sentiment Index)  
