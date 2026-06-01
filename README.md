@@ -2,144 +2,158 @@
 
 Institutional Intelligence → Risk-Managed Crypto Signals
 
-Agentic Finance Studio is an AI-powered Telegram bot that helps traders turn market sentiment into clear, actionable insights.  
-Instead of reacting to noise, the bot delivers structured intelligence for assets like BTC, ETH, XRP, and SOL — combining price tracking and smart signals.
+Agentic Finance Studio is an AI-powered Telegram bot that helps traders turn market sentiment into clear, actionable insights.
+
+Instead of reacting to noise, the bot delivers structured intelligence for assets like BTC, ETH, XRP, and SOL by combining institutional sentiment, market data, and technical analysis.
+
 
 🎯 Project Vision
 
-Retail traders often struggle with:  
-- Information overload  
-- Late entries  
+Retail traders often struggle with:
+
+- Information overload
+- Late entries
 - Lack of clear signals
 
-Agentic Finance Studio solves this by combining:  
-- Institutional Sentiment from SoSoValue  
-- Market Data Intelligence with multi-source pricing  
-- Actionable Alerts delivered in real-time via Telegram
+Agentic Finance Studio solves this by combining:
+
+- Institutional Sentiment from SoSoValue
+- Market Data Intelligence with multi-source pricing
+- Actionable Alerts delivered in real time via Telegram
+
 
 🏗️ Modular Architecture
 
 The system is built on a decoupled three-tier architecture:
 
-1. Intelligence Layer — SoSoValue API for institutional data and pricing  
-2. Signal Engine — Asynchronous Python for fast technical analysis and whale monitoring  
-3. Delivery Layer — Clean, mobile-first Telegram interface with full button navigation
+1. Intelligence Layer
 
-🛠️ Tech Stack  
-- Backend: Python (Asynchronous)  
-- Framework: python-telegram-bot  
-- Hosting: JustRunMy.app (24/7)  
-- Primary API: SoSoValue  
-- Fallbacks: CoinGecko + Binance  
-- Security: Environment variables only
+- SoSoValue API for institutional data and pricing
+
+2. Signal Engine
+
+- Asynchronous Python processing
+- Technical analysis
+- Whale monitoring
+- Risk management
+
+3. Delivery Layer
+
+- Mobile-first Telegram interface
+- Button-driven navigation
+- Real-time alert delivery
+
+
+🛠️ Tech Stack
+
+- Backend: Python (Async)
+- Framework: python-telegram-bot
+- Hosting: JustRunMy.app (24/7)
+- Primary API: SoSoValue
+- Fallback APIs: CoinGecko + Binance
+- Security: Environment Variables
+
 
 🚀 Key Features (Wave 1)
 
-- Real-time price tracking for BTC, ETH, XRP, and SOL  
-- Smart Signal Engine with Entry, TP, and SL levels  
-- Whale Activity Reports  
-- Sector Intelligence Overview  
-- Background Smart Alerts  
-- Robust multi-API fallback system
+- Real-time price tracking for BTC, ETH, XRP, and SOL
+- Smart signal engine with Entry, TP, and SL levels
+- Whale activity monitoring
+- Sector intelligence overview
+- Background smart alerts
+- Multi-API failover system
+
 
 📦 Installation & Setup
 
-git clone https://github.com/fxscalpersignals/agentic-finance-studio.git  
-cd agentic-finance-studio  
-pip install -r requirements.txt  
+git clone https://github.com/fxscalpersignals/agentic-finance-studio.git
+cd agentic-finance-studio
+pip install -r requirements.txt
 python main.py
 
-Environment Variables:
+Environment Variables
 
-TELEGRAM_TOKEN=your_telegram_bot_token  
+TELEGRAM_TOKEN=your_telegram_bot_token
 SOSO_API_KEY=your_sosovalue_api_key
+CHAT_ID=your_telegram_chat_id
 
-CHAT_ID=your_telegram_chat_id for auto scanner alerts
 
-Roadmap: The 3 Waves
+🌊 Roadmap
 
-🌊 Wave 1: The Foundation (Completed)
+Wave 1: Foundation ✅
 
-• Asynchronous Telegram bot running 24/7  
-• Multi-source price engine (SoSoValue Primary → CoinGecko → Binance)  
-• Assets: BTC, ETH, XRP, SOL  
-• Whale Monitoring (MVP)  
-• Secure environment-based configuration
+- Asynchronous Telegram bot
+- Multi-source pricing engine
+- BTC, ETH, XRP, SOL coverage
+- Whale monitoring MVP
+- Secure configuration
 
-🚀 Key Features (Wave 2)
 
-- Real-time ATR-based signals with intelligent pullback entries, TP & SL
-- EMA trend filtering (EMA20/EMA50)
-- Live Sector Intelligence Map (AI, PAYFI, RWA, DEFI)
-- Whale Radar for extreme momentum detection
-- ETF Flow Intelligence & institutional rotation analysis
-- Dynamic SSI (Sentiment Index) with fallback
-- Fully button-driven Telegram interface
-- Production-ready: Global Session, Cooldown, Graceful Shutdown, Safe Rate Limiting
-- Paper Trading Portfolio with PnL tracking
-- Auto Scanner with smart alerts
-  
-🌊 Wave 2: Institutional Intelligence (Completed)
+Wave 2: Institutional Intelligence ✅
 
-• SSI Integration (SoSoValue Sentiment Index)
+Features Added
 
-• Sector Intelligence (AI Agents, PayFi, RWA)
+- SSI (Sentiment Intelligence Score)
+- ATR-based signal generation
+- Intelligent pullback entries
+- Dynamic TP & SL levels
+- EMA20 / EMA50 trend filtering
+- Dynamic Risk:Reward analysis
+- Confidence scoring system
+- Sector Intelligence Map
+- ETF Flow Intelligence
+- Whale Radar
+- Paper trading portfolio
+- Auto Scanner alerts
+- Graceful shutdown & caching
+- Safe rate limiting
 
-• Advanced Signal Engine (Sentiment + Technical Confluence)
-
-• ATR-based Risk Management
-
-• Dynamic Risk:Reward Analysis
-
-• Smart Alerts (automated)
-
-• Confidence Scoring System
-
-🌊 Wave 3: The Execution Layer (Future Goal)
-
-• On-chain trading via SoDEX SDK  
-• Yield Intelligence alerts  
-• Full automation pipeline  
-• Automated trade execution workflows
-
-⚙️ Testing Instructions  
-Allow 5–10 seconds between commands for best performance.  
-The bot uses a tiered fallback system to ensure reliability.
 
 📈 Signal Framework
 
 Every signal combines:
 
-• SoSoValue sentiment intelligence
+- SoSoValue sentiment intelligence
+- Sector rotation analysis
+- ETF flow context
+- Whale activity detection
+- EMA trend confirmation
+- ATR-based risk management
 
-• Sector rotation analysis
+Signal Output
 
-• ETF flow context
+- Entry
+- Take Profit
+- Stop Loss
+- Risk:Reward Ratio
+- Confidence Score
 
-• Whale activity detection
 
-• EMA trend confirmation
+🌊 Wave 3: Execution Layer (Future)
 
-• ATR-based risk management
+- On-chain trading via SoDEX SDK
+- Yield intelligence alerts
+- Full automation pipeline
+- Automated trade execution workflows
 
-Output:
 
-• Entry
+⚙️ Testing Notes
 
-• Take Profit
+- Allow 5–10 seconds between commands
+- Built-in caching and rate limiting
+- Automatic API fallback for reliability
 
-• Stop Loss
-
-• Risk:Reward Ratio
-
-• Confidence Score
 
 ⚠️ Disclaimer
 
-This project is for educational and demonstration purposes only.  
+This project is for educational and demonstration purposes only.
+
 Not financial advice. Trade at your own risk.
 
-Live Bot: https://t.me/AgenticFinanceBot  
+
+Links
+
+Live Bot: https://t.me/AgenticFinanceBot
 
 Demo Video: https://www.youtube.com/watch?v=2WVZ96wgUTU
 
