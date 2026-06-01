@@ -91,7 +91,7 @@ Roadmap: The 3 Waves
 • On-chain trading via SoDEX SDK  
 • Yield Intelligence alerts  
 • Full automation pipeline  
-• Monetization via Telegram Stars
+• Automated trade execution workflows
 
 ⚙️ Testing Instructions  
 Allow 5–10 seconds between commands for best performance.  
