@@ -83,7 +83,9 @@ Roadmap: The 3 Waves
 
 • SSI Integration (SoSoValue Sentiment Index)  
 • Sector Intelligence (AI Agents, PayFi, RWA)  
-• Advanced Signal Engine (Sentiment + Price Action)  
+• Advanced Signal Engine (Sentiment + Technical Confluence)
+• ATR-based Risk Management
+• Dynamic Risk:Reward Analysis
 • Smart Alerts (automated)
 
 🌊 Wave 3: The Execution Layer (Future Goal)
