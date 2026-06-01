@@ -1,6 +1,6 @@
 🚀 Agentic Finance Studio
 
-Institutional Sentiment → Actionable Crypto Signals
+Institutional Intelligence → Risk-Managed Crypto Signals
 
 Agentic Finance Studio is an AI-powered Telegram bot that helps traders turn market sentiment into clear, actionable insights.  
 Instead of reacting to noise, the bot delivers structured intelligence for assets like BTC, ETH, XRP, and SOL — combining price tracking and smart signals.
@@ -87,6 +87,7 @@ Roadmap: The 3 Waves
 • ATR-based Risk Management
 • Dynamic Risk:Reward Analysis
 • Smart Alerts (automated)
+• Confidence Scoring System
 
 🌊 Wave 3: The Execution Layer (Future Goal)
 
@@ -98,6 +99,25 @@ Roadmap: The 3 Waves
 ⚙️ Testing Instructions  
 Allow 5–10 seconds between commands for best performance.  
 The bot uses a tiered fallback system to ensure reliability.
+
+📈 Signal Framework
+
+Every signal combines:
+
+• SoSoValue sentiment intelligence
+• Sector rotation analysis
+• ETF flow context
+• Whale activity detection
+• EMA trend confirmation
+• ATR-based risk management
+
+Output:
+
+• Entry
+• Take Profit
+• Stop Loss
+• Risk:Reward Ratio
+• Confidence Score
 
 ⚠️ Disclaimer
 
