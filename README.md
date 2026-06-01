@@ -103,7 +103,9 @@ This project is for educational and demonstration purposes only.
 Not financial advice. Trade at your own risk.
 
 Live Bot: https://t.me/AgenticFinanceBot  
+
 Demo Video: https://www.youtube.com/watch?v=2WVZ96wgUTU
+
 GitHub: https://github.com/fxscalpersignals/agentic-finance-studio
 
 Built by fxscalpersignals (Solo Developer) for the SoSoValue Buildathon.
