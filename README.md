@@ -81,12 +81,18 @@ Roadmap: The 3 Waves
   
 🌊 Wave 2: Institutional Intelligence (Completed)
 
-• SSI Integration (SoSoValue Sentiment Index)  
-• Sector Intelligence (AI Agents, PayFi, RWA)  
+• SSI Integration (SoSoValue Sentiment Index)
+
+• Sector Intelligence (AI Agents, PayFi, RWA)
+
 • Advanced Signal Engine (Sentiment + Technical Confluence)
+
 • ATR-based Risk Management
+
 • Dynamic Risk:Reward Analysis
+
 • Smart Alerts (automated)
+
 • Confidence Scoring System
 
 🌊 Wave 3: The Execution Layer (Future Goal)
