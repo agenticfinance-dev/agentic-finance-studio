@@ -105,18 +105,27 @@ The bot uses a tiered fallback system to ensure reliability.
 Every signal combines:
 
 • SoSoValue sentiment intelligence
+
 • Sector rotation analysis
+
 • ETF flow context
+
 • Whale activity detection
+
 • EMA trend confirmation
+
 • ATR-based risk management
 
 Output:
 
 • Entry
+
 • Take Profit
+
 • Stop Loss
+
 • Risk:Reward Ratio
+
 • Confidence Score
 
 ⚠️ Disclaimer
