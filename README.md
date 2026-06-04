@@ -135,15 +135,20 @@ Every signal combines:
 - Whale activity detection
 - EMA trend confirmation
 - ATR-based risk management
+- RSI momentum confirmation (overbought/oversold filter)
+- Multi-source signal attribution (SoSoValue primary, CoinGecko & Binance fallback with display tagging)
 
 Signal Output
 
-- Entry
-- Pullback Entry Zone
+- Current Price
+- Entry (Pullback Zone)
 - Take Profit
 - Stop Loss
 - Risk:Reward Ratio
+- RSI Confirmation
+- EMA Trend Bias
 - Confidence Score
+- Data Source Label
 
 
 📊 Example Signal
