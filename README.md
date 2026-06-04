@@ -88,7 +88,9 @@ python main.py
 Environment Variables
 
 TELEGRAM_TOKEN=your_telegram_bot_token
+
 SOSO_API_KEY=your_sosovalue_api_key
+
 CHAT_ID=your_telegram_chat_id
 
 
