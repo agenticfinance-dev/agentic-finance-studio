@@ -139,6 +139,7 @@ Every signal combines:
 Signal Output
 
 - Entry
+- Pullback Entry Zone
 - Take Profit
 - Stop Loss
 - Risk:Reward Ratio
@@ -151,6 +152,7 @@ BTC — LONG Signal
 
 - Confidence Score: 87%
 - Entry: $108,500
+- Pullback Entry: $107,900
 - Take Profit: $111,200
 - Stop Loss: $107,300
 - Risk:Reward Ratio: 1:2.4
@@ -177,6 +179,7 @@ Source: SoSoValue
 - Automated Telegram signal delivery
 - Dynamic Risk:Reward calculations
 - Confidence scoring framework
+- Intelligent pullback entry framework
 - Institutional sentiment integration
 - 24/7 autonomous market scanner
 - Persistent paper-trading portfolio
