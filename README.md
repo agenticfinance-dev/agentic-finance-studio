@@ -34,6 +34,7 @@ Agentic Finance Studio transforms market data into actionable trade intelligence
 - Whale activity monitoring
 - Technical confirmation
 - Risk-managed trade planning
+- Intelligent pullback entries instead of chasing market prices
 
 The result is a structured decision framework rather than isolated market signals.
 
@@ -111,7 +112,7 @@ Features Added
 
 - SSI (Sentiment Intelligence Score)
 - ATR-based signal generation
-- Intelligent pullback entries
+- Intelligent pullback entry framework 
 - Dynamic TP & SL levels
 - EMA20 / EMA50 trend filtering
 - Dynamic Risk:Reward analysis
@@ -162,8 +163,12 @@ BTC — LONG Signal
 - Stop Loss: $107,300
 - Risk:Reward Ratio: 1:2.4
 
-Reasoning: Bullish EMA Trend + Oversold RSI Recovery  
-Source: CoinGecko (with SoSoValue sentiment)
+Reasoning:
+✓ Bullish EMA Trend
+✓ Oversold RSI Recovery
+✓ Positive Sentiment Bias
+
+Source: CoinGecko (Price Data) + SoSoValue (Sentiment)
 
 
 
@@ -179,6 +184,7 @@ Source: CoinGecko (with SoSoValue sentiment)
 - 24/7 autonomous market scanner
 - Persistent paper-trading portfolio
 - Mobile-first user experience
+- Transparent signal reasoning and source attribution
 
 
 🌊 Wave 3: Execution Layer (Future)
