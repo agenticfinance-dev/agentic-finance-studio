@@ -164,6 +164,7 @@ BTC — LONG Signal
 - Risk:Reward Ratio: 1:2.4
 
 Reasoning:
+
 ✓ Bullish EMA Trend
 
 ✓ Oversold RSI Recovery
