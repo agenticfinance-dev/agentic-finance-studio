@@ -165,7 +165,9 @@ BTC — LONG Signal
 
 Reasoning:
 ✓ Bullish EMA Trend
+
 ✓ Oversold RSI Recovery
+
 ✓ Positive Sentiment Bias
 
 Source: CoinGecko (Price Data) + SoSoValue (Sentiment)
