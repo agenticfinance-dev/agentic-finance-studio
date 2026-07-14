@@ -18,10 +18,20 @@ import numpy as np
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 
 # ================= CONFIG =================
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_TOKEN environment variable is not set!")
+
 SOSO_API_KEY = os.getenv("SOSO_API_KEY")
 ADMIN_CHAT_ID = os.getenv("CHAT_ID")
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
@@ -61,9 +71,42 @@ DB_PATH = "bot_database.db"
 def init_database():
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, subscribed INTEGER DEFAULT 0, auto_trade_enabled INTEGER DEFAULT 0, max_position REAL DEFAULT 100, risk_per_trade REAL DEFAULT 2, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS paper_trades (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, symbol TEXT, side TEXT, entry_price REAL, exit_price REAL, tp REAL, sl REAL, pnl REAL, result TEXT, opened_at TIMESTAMP, closed_at TIMESTAMP)''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS signals (id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, bias TEXT, confidence INTEGER, entry_price REAL, tp REAL, sl REAL, reasoning TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            subscribed INTEGER DEFAULT 0,
+            auto_trade_enabled INTEGER DEFAULT 0,
+            max_position REAL DEFAULT 100,
+            risk_per_trade REAL DEFAULT 2,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_active TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS paper_trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            symbol TEXT,
+            side TEXT,
+            entry_price REAL,
+            exit_price REAL,
+            tp REAL,
+            sl REAL,
+            pnl REAL,
+            result TEXT,
+            opened_at TIMESTAMP,
+            closed_at TIMESTAMP
+        )''')
+        cursor.execute('''CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            bias TEXT,
+            confidence INTEGER,
+            entry_price REAL,
+            tp REAL,
+            sl REAL,
+            reasoning TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
         conn.commit()
         logging.info("✅ Database initialized")
 
@@ -188,7 +231,7 @@ def save_signal_to_db(signal: Dict):
         cursor.execute('''
             INSERT INTO signals (symbol, bias, confidence, entry_price, tp, sl, reasoning)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (signal['symbol'], signal['bias'], signal['confidence'], 
+        ''', (signal['symbol'], signal['bias'], signal['confidence'],
               signal['entry'], signal['tp'], signal['sl'], signal['reasoning']))
 
 user_last_interaction = {}
@@ -508,114 +551,148 @@ async def generate_signal(session, symbol: str) -> Dict:
     save_analytics()
     return signal
 
-# ================= EIP-712 PAYLOAD =================
+# ================= EIP-712 PAYLOAD (FIXED) =================
 def generate_eip712_payload(from_token: str, to_token: str, amount: float, user_address: str = "0xYourWalletAddress"):
     domain = {
         "name": "SoDEX",
         "version": "1",
         "chainId": 8453,
-        "verifyingContract": "0x0000000000000000000000000000000000000000"
+        "verifyingContract": "0x0000000000000000000000000000000000000000"  # placeholder
     }
-    
-    types = {
-        "Swap": [
-            {"name": "fromToken", "type": "address"},
-            {"name": "toToken", "type": "address"},
-            {"name": "amount", "type": "uint256"},
-            {"name": "user", "type": "address"},
-            {"name": "deadline", "type": "uint256"}
-        ]
-    }
-    
-    value = {
-        "fromToken": from_token,
-        "toToken": to_token,
-        "amount": int(amount * 1e18),
-        "user": user_address,
-        "deadline": int(time.time()) + 3600
-    }
-    
+    # Return a simple dict – you can extend with actual EIP-712 structure
     return {
         "domain": domain,
-        "types": types,
-        "value": value,
-        "primaryType": "Swap"
+        "message": {
+            "fromToken": from_token,
+            "toToken": to_token,
+            "amount": amount,
+            "user": user_address
+        },
+        "primaryType": "Swap",
+        "types": {
+            "EIP712Domain": [
+                {"name": "name", "type": "string"},
+                {"name": "version", "type": "string"},
+                {"name": "chainId", "type": "uint256"},
+                {"name": "verifyingContract", "type": "address"}
+            ],
+            "Swap": [
+                {"name": "fromToken", "type": "address"},
+                {"name": "toToken", "type": "address"},
+                {"name": "amount", "type": "uint256"},
+                {"name": "user", "type": "address"}
+            ]
+        }
     }
 
-# ================= BUTTON HANDLER =================
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= HANDLERS =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    save_user_to_db(user.id, user.username, user.first_name)
+    await update.message.reply_text(
+        f"🚀 Welcome {user.first_name}!\n"
+        "I am your AI trading assistant. Use the menu below to explore.\n\n"
+        "🔹 /help – show commands\n"
+        "🔹 /menu – show main menu",
+        reply_markup=build_main_menu()
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📖 *Available Commands:*\n"
+        "/start – start the bot\n"
+        "/help – this message\n"
+        "/menu – show main menu\n"
+        "/signal <coin> – get signal (e.g. /signal btc)\n"
+        "/portfolio – view paper portfolio\n"
+        "/backtest – run backtest\n"
+        "/daily – daily report\n"
+        "/alerts – toggle alerts\n"
+        "/autotrade – auto-trade settings\n"
+        "/sodex – execute SoDEX swap\n"
+        "/premium – premium features",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("📊 Main Menu:", reply_markup=build_main_menu())
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    action = query.data
-    session = await get_session(context.application)
-    user_id = query.from_user.id
-    
-    try:
-        if action.startswith("signal_"):
-            symbol = action.split("_")[1]
-            signal = await generate_signal(session, symbol)
-            msg = f"🧠 **{signal['symbol']} SIGNAL** — {signal['confidence']}%\n\n" \
-                  f"💰 **${format_price(signal['price'])}**\n" \
-                  f"🎯 Entry: **${format_price(signal['entry'])}**\n" \
-                  f"🏆 TP: **\( {format_price(signal['tp'])}** | SL: ** \){format_price(signal['sl'])}**\n" \
-                  f"⚖️ R:R **1:{signal['rr_ratio']}**\n\n" \
-                  f"{signal['reasoning']}"
-            kb = [[InlineKeyboardButton("💰 Bybit", url=BYBIT_REFERRAL_LINK)], [InlineKeyboardButton("🔙 Back", callback_data="back_main")]]
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-        
-        elif action == "sodex_menu":
-            kb = [
-                [InlineKeyboardButton("🔄 ETH → USDC", callback_data="sodex_swap_ETH_USDC")],
-                [InlineKeyboardButton("🔄 SOL → USDC", callback_data="sodex_swap_SOL_USDC")],
-                [InlineKeyboardButton("📊 Show EIP-712 Payload", callback_data="show_eip712")],
-                [InlineKeyboardButton("🔙 Back", callback_data="back_main")]
-            ]
-            await query.edit_message_text("⚡ **SoDEX Real Execution (Simulation Mode)**\n\nSelect action below.", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
-        
-        elif action.startswith("sodex_swap_"):
-            parts = action.split("_")
-            from_token = parts[2]
-            to_token = parts[3] if len(parts) > 3 else "USDC"
-            await query.edit_message_text(f"🔄 Preparing swap {from_token} → {to_token}...", reply_markup=None)
-            payload = generate_eip712_payload(from_token, to_token, 100)
-            msg = f"✅ **EIP-712 Payload Ready**\n\n```json\n{json.dumps(payload, indent=2)}\n```\n\nCopy this for wallet signing (demo mode)."
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="sodex_menu")]]), parse_mode=ParseMode.MARKDOWN)
-        
-        elif action == "show_eip712":
-            payload = generate_eip712_payload("ETH", "USDC", 100)
-            msg = f"🔑 **EIP-712 Payload Example**\n\n```json\n{json.dumps(payload, indent=2)}\n```"
-            await query.edit_message_text(msg, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="sodex_menu")]]), parse_mode=ParseMode.MARKDOWN)
-        
-        elif action == "back_main":
-            await query.edit_message_text("🏠 **Main Menu**", reply_markup=build_main_menu(), parse_mode=ParseMode.MARKDOWN)
-    
-    except Exception as e:
-        logging.error(f"Button error: {e}")
-        await query.edit_message_text("⚠️ Error. Please try again.", reply_markup=build_main_menu())
+    data = query.data
+    # Placeholder responses – extend as needed
+    if data.startswith("signal_"):
+        symbol = data.split("_")[1]
+        session = await get_session(context.application)
+        signal = await generate_signal(session, symbol)
+        msg = (
+            f"📈 *{signal['symbol']} Signal*\n"
+            f"Bias: {signal['bias']}\n"
+            f"Confidence: {signal['confidence']}%\n"
+            f"Entry: ${signal['entry']:.2f}\n"
+            f"TP: ${signal['tp']:.2f}\n"
+            f"SL: ${signal['sl']:.2f}\n"
+            f"RR: {signal['rr_ratio']}\n"
+            f"Reasoning: {signal['reasoning']}"
+        )
+        await query.edit_message_text(msg, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await query.edit_message_text(f"🛠️ Feature '{data}' is under development.\nUse /help for available commands.")
+
+# ================= BACKGROUND TASKS (Placeholders) =================
+async def scanner_task(app):
+    while True:
+        await asyncio.sleep(60)  # run every minute
+        # Implement scanner logic here
+
+async def heartbeat_task(app):
+    while True:
+        await asyncio.sleep(30)
+        # Send heartbeat to admin if needed
 
 # ================= MAIN =================
-def main():
-    if not TOKEN:
-        logging.error("❌ TELEGRAM_TOKEN not set!")
-        return
-    
+async def main():
+    # Initialize database
     init_database()
-    
-    application = (ApplicationBuilder()
-                   .token(TOKEN)
-                   .post_init(post_init)
-                   .post_shutdown(post_shutdown)
-                   .build())
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    
-    logging.info("🚀 Agentic Finance Studio v4 (Wave 3 + Wave 4) deployed for Render")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-async def post_init(app):
-    await get_session(app)
-    logging.info("✅ Background tasks started")
+    # Build application
+    application = ApplicationBuilder().token(TOKEN).build()
+
+    # Register handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CallbackQueryHandler(button_callback))
+
+    # Add shutdown hook
+    application.on_shutdown.append(post_shutdown)
+
+    # Start background tasks
+    loop = asyncio.get_running_loop()
+    application.bot_data["scanner_task"] = loop.create_task(scanner_task(application))
+    application.bot_data["heartbeat_task"] = loop.create_task(heartbeat_task(application))
+    # Add other tasks as needed
+
+    # Start polling
+    logging.info("🤖 Bot is starting...")
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    # Keep running until interrupted
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        logging.info("Received shutdown signal...")
+    finally:
+        await application.shutdown()
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logging.info("Bot stopped by user")
+    except Exception as e:
+        logging.error(f"Fatal error: {e}\n{traceback.format_exc()}")
