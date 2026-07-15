@@ -26,41 +26,40 @@ async def load_symbols(session):
     try:
         url = f"{SODEX_PERPS_URL}/markets/symbols"
         logging.info(f"SoDEX URL: {url}")
-
         async with session.get(url) as r:
             logging.info(f"SoDEX status: {r.status}")
             txt = await r.text()
-            logging.info(f"SoDEX body: {txt[:2000]}")
-
             if r.status!= 200:
-                logging.warning(f"[SoDEX] Non-200 status {r.status} - endpoint may be wrong or auth required")
+                logging.warning(f"[SoDEX] status {r.status}")
                 return
-
-            try:
-                j = json.loads(txt)
-            except Exception as je:
-                logging.exception(f"[SoDEX] JSON parse failed: {je}")
-                return
-
-            data = j if isinstance(j, list) else j.get("data", [])
-
-            if not data:
-                logging.warning(f"[SoDEX] Empty data, full JSON: {txt[:2000]}")
-                return
-
+            j = json.loads(txt)
+            data = j.get("data", j) if isinstance(j, dict) else j
             for item in data:
-                sid = item.get("symbolID") or item.get("id") or item.get("symbolId") or item.get("symbol_id")
-                sym = item.get("symbol") or item.get("symbolName") or item.get("name")
+                if not isinstance(item, dict):
+                    continue
+                sid = item.get("symbolID") or item.get("id") or item.get("symbolId")
+                sym = item.get("symbol") or item.get("displayName") or item.get("name")
                 if sid and sym:
                     try:
-                        SYMBOL_IDS[sym] = int(sid)
+                        SYMBOL_IDS[sym.strip()] = int(sid)
                     except:
-                        logging.warning(f"[SoDEX] Bad item: {item}")
-
+                        pass
             logging.info(f"[SoDEX] Loaded {len(SYMBOL_IDS)} symbols: {SYMBOL_IDS}")
+    except Exception:
+        logging.exception("[SoDEX] load_symbols failed")
 
-    except Exception as e:
-        logging.exception("[SoDEX] load_symbols failed") # FULL TRACEBACK
+def find_symbol_id(symbol: str):
+    """Find correct symbolID - SoDEX uses BTC-USD not BTC-USDT-PERP"""
+    sym = symbol.upper().strip()
+    # Direct tries
+    for cand in [f"{sym}-USD", f"{sym}-USDT", f"{sym}-USDT-PERP", f"{sym}-USD-PERP", sym]:
+        if cand in SYMBOL_IDS:
+            return SYMBOL_IDS[cand], cand
+    # Fuzzy: any key starting with BTC-
+    for k, v in SYMBOL_IDS.items():
+        if k.upper().startswith(sym + "-") or k.upper() == sym:
+            return v, k
+    return None, None
 
 class SoDEXExecutor:
     def __init__(self, api_key_name: str, private_key: str, account_id: str):
@@ -102,11 +101,14 @@ class SoDEXExecutor:
     async def place_order(self, session, symbol: str, bias: str, entry: float, qty: float):
         if not self.ready: return {"err": "SoDEX not configured"}
         qty = max(0.001, float(qty))
-        symbol_str = f"{symbol.upper()}-USDT-PERP"
-        symbol_id = SYMBOL_IDS.get(symbol_str)
+
+        symbol_id, found_name = find_symbol_id(symbol)
         if symbol_id is None:
-            logging.error(f"[SoDEX] symbolID missing for {symbol_str}, have: {SYMBOL_IDS}")
-            return {"err": f"symbolID not loaded for {symbol_str}. Loaded: {SYMBOL_IDS}"}
+            logging.error(f"[SoDEX] symbolID missing for {symbol}, have: {SYMBOL_IDS}")
+            return {"err": f"symbolID not loaded for {symbol}. Found: {found_name} Loaded: {list(SYMBOL_IDS.keys())[:20]}"}
+
+        logging.info(f"[SoDEX] Using {found_name} -> ID {symbol_id} for {symbol}")
+
         raw_order = {"clOrdID": f"AF-{int(datetime.now().timestamp()*1000)}","modifier": 1,"side": 1 if bias=="LONG" else 2,"type": 1,"timeInForce": 1,"price": f"{entry:.2f}","quantity": f"{qty:.4f}","reduceOnly": False,"positionSide": 1}
         params = {"accountID": int(float(self.account_id)), "symbolID": symbol_id, "orders": [raw_order]}
         action_payload = {"type": "newOrder", "params": params}
@@ -116,28 +118,8 @@ class SoDEXExecutor:
             async with session.post(f"{SODEX_PERPS_URL}/trade/orders", json=params, headers=headers) as r:
                 txt = await r.text()
                 logging.info(f"[SoDEX] Place {r.status} {txt[:1000]}")
-                if r.status in [200,201]: return {"ok": json.loads(txt) if txt else {}}
-                return {"err": f"{r.status} {txt[:800]}"}
+                if r.status in [200,201]: return {"ok": json.loads(txt) if txt else {}, "used_symbol": found_name}
+                return {"err": f"{r.status} {txt[:800]}", "used_symbol": found_name}
         except Exception as e:
             logging.exception("[SoDEX] place_order failed")
-            return {"err": str(e)}
-
-    async def cancel_order(self, session, symbol: str, order_id: int = None, cl_ord_id: str = None):
-        if not self.ready: return {"err": "SoDEX not configured"}
-        try:
-            symbol_id = SYMBOL_IDS.get(f"{symbol.upper()}-USDT-PERP")
-            if symbol_id is None: return {"err": "symbolID not loaded"}
-            cancel = {"symbolID": symbol_id}
-            if order_id is not None: cancel["orderID"] = int(order_id)
-            if cl_ord_id is not None: cancel["clOrdID"] = cl_ord_id
-            params = {"accountID": int(float(self.account_id)), "cancels": [cancel]}
-            action_payload = {"type": "cancelOrder", "params": params}
-            sig, nonce, _ = self.sign(action_payload)
-            headers = {"X-API-Key": self.api_key_name, "X-API-Sign": sig, "X-API-Nonce": str(nonce), "Content-Type": "application/json"}
-            async with session.delete(f"{SODEX_PERPS_URL}/trade/orders", json=params, headers=headers) as r:
-                txt = await r.text()
-                if r.status in [200,201,204]: return {"ok": json.loads(txt) if txt else {}}
-                return {"err": f"{r.status} {txt[:800]}"}
-        except Exception as e:
-            logging.exception("[SoDEX] cancel_order failed")
             return {"err": str(e)}
