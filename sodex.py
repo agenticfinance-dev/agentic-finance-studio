@@ -10,6 +10,8 @@ try:
 except ImportError:
     HAS_EIP712 = False
 
+# Try changing this if you get invalid signature: "SODEX", "SoDEX", "Bolt", "futures"
+PERPS_DOMAIN_NAME = "SODEX"
 SODEX_CHAIN_ID = 286623
 SODEX_PERPS_URL = "https://mainnet-gw.sodex.dev/api/v1/perps"
 SYMBOL_IDS = {}
@@ -77,12 +79,7 @@ class SoDEXExecutor:
         self.ready = HAS_EIP712 and bool(self.private_key_raw and self.api_key_name)
 
     def _payload_hash(self, action_payload: dict) -> bytes:
-        j = json.dumps(
-            action_payload,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            sort_keys=False
-        ).encode()
+        j = json.dumps(action_payload, separators=(",", ":"), ensure_ascii=False, sort_keys=False).encode()
         return keccak(j)
 
     def sign(self, action_payload: dict, nonce: int):
@@ -102,7 +99,7 @@ class SoDEXExecutor:
             },
             "primaryType": "ExchangeAction",
             "domain": {
-                "name": "futures",
+                "name": PERPS_DOMAIN_NAME,
                 "version": "1",
                 "chainId": SODEX_CHAIN_ID,
                 "verifyingContract": "0x" + "0"*40
@@ -119,13 +116,10 @@ class SoDEXExecutor:
     async def place_order(self, session, symbol: str, bias: str, entry: float, qty: float):
         if not self.ready:
             return {"err": "SoDEX not configured"}
-
         symbol_id, found_name = find_symbol_id(symbol)
         if symbol_id is None:
-            return {"err": f"symbolID not found for {symbol}. Have: {list(SYMBOL_IDS.keys())[:15]}"}
-
+            return {"err": f"symbolID not found for {symbol}"}
         nonce = next_nonce()
-
         price_str = format(Decimal(str(entry)), "f").rstrip("0").rstrip(".")
         qty_str = format(Decimal(str(qty)), "f").rstrip("0").rstrip(".")
 
@@ -147,14 +141,10 @@ class SoDEXExecutor:
             "orders": [order]
         }
 
-        action_payload = {
-            "type": "newOrder",
-            "params": payload
-        }
+        action_payload = {"type": "newOrder", "params": payload}
 
         try:
             sig = self.sign(action_payload, nonce)
-
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -167,13 +157,10 @@ class SoDEXExecutor:
 
             async with session.post(f"{SODEX_PERPS_URL}/trade/orders", json=payload, headers=headers) as r:
                 txt = await r.text()
-                logging.info(f"[SoDEX] Place {found_name} ID={symbol_id} {r.status} {txt[:800]}")
+                logging.info(f"[SoDEX] {found_name} ID={symbol_id} {r.status} {txt[:800]}")
                 if r.status in [200, 201]:
-                    try:
-                        return {"ok": json.loads(txt) if txt else {}, "used_symbol": found_name}
-                    except:
-                        return {"ok": {"raw": txt}, "used_symbol": found_name}
-                return {"err": f"{r.status} {txt[:800]}", "used_symbol": found_name}
+                    return {"ok": json.loads(txt) if txt else {}, "used_symbol": found_name}
+                return {"err": f"{r.status} {txt[:800]}"}
         except Exception as e:
             logging.exception("[SoDEX] place_order failed")
             return {"err": str(e)}
