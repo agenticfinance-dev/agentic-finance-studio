@@ -18,7 +18,7 @@ def clean_priv(k: str) -> str:
     if k.startswith("0x0x"): k = k[2:]
     if not k.startswith("0x"): k = "0x"+k
     if len(k)!= 66:
-        raise ValueError(f"Invalid key length {len(k)} expected 66")
+        raise ValueError(f"Invalid key length {len(k)}")
     return k
 
 async def load_symbols(session):
@@ -30,34 +30,27 @@ async def load_symbols(session):
             logging.info(f"SoDEX status: {r.status}")
             txt = await r.text()
             if r.status!= 200:
-                logging.warning(f"[SoDEX] status {r.status}")
                 return
             j = json.loads(txt)
             data = j.get("data", j) if isinstance(j, dict) else j
             for item in data:
-                if not isinstance(item, dict):
-                    continue
-                sid = item.get("symbolID") or item.get("id") or item.get("symbolId")
+                if not isinstance(item, dict): continue
+                sid = item.get("symbolID") or item.get("id")
                 sym = item.get("symbol") or item.get("displayName") or item.get("name")
                 if sid and sym:
-                    try:
-                        SYMBOL_IDS[sym.strip()] = int(sid)
-                    except:
-                        pass
-            logging.info(f"[SoDEX] Loaded {len(SYMBOL_IDS)} symbols: {SYMBOL_IDS}")
+                    SYMBOL_IDS[sym.strip()] = int(sid)
+            logging.info(f"[SoDEX] Loaded {len(SYMBOL_IDS)} symbols")
     except Exception:
         logging.exception("[SoDEX] load_symbols failed")
 
 def find_symbol_id(symbol: str):
-    """Find correct symbolID - SoDEX uses BTC-USD not BTC-USDT-PERP"""
     sym = symbol.upper().strip()
-    # Direct tries
-    for cand in [f"{sym}-USD", f"{sym}-USDT", f"{sym}-USDT-PERP", f"{sym}-USD-PERP", sym]:
+    # SoDEX uses BTC-USD format
+    for cand in [f"{sym}-USD", f"{sym}-USDT", f"{sym}-USD-PERP", sym]:
         if cand in SYMBOL_IDS:
             return SYMBOL_IDS[cand], cand
-    # Fuzzy: any key starting with BTC-
     for k, v in SYMBOL_IDS.items():
-        if k.upper().startswith(sym + "-") or k.upper() == sym:
+        if k.upper().startswith(sym + "-"):
             return v, k
     return None, None
 
@@ -77,18 +70,7 @@ class SoDEXExecutor:
         p_hash_bytes = self._payload_hash(action_payload)
         payload_hash_field = HexBytes(p_hash_bytes)
         typed = {
-            "types": {
-                "EIP712Domain": [
-                    {"name":"name","type":"string"},
-                    {"name":"version","type":"string"},
-                    {"name":"chainId","type":"uint256"},
-                    {"name":"verifyingContract","type":"address"}
-                ],
-                "ExchangeAction": [
-                    {"name":"payloadHash","type":"bytes32"},
-                    {"name":"nonce","type":"uint64"}
-                ]
-            },
+            "types": {"EIP712Domain": [{"name":"name","type":"string"},{"name":"version","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"}],"ExchangeAction": [{"name":"payloadHash","type":"bytes32"},{"name":"nonce","type":"uint64"}]},
             "primaryType": "ExchangeAction",
             "domain": {"name": "futures","version": "1","chainId": SODEX_CHAIN_ID,"verifyingContract": "0x" + "0"*40},
             "message": {"payloadHash": payload_hash_field, "nonce": nonce}
@@ -101,14 +83,10 @@ class SoDEXExecutor:
     async def place_order(self, session, symbol: str, bias: str, entry: float, qty: float):
         if not self.ready: return {"err": "SoDEX not configured"}
         qty = max(0.001, float(qty))
-
         symbol_id, found_name = find_symbol_id(symbol)
         if symbol_id is None:
-            logging.error(f"[SoDEX] symbolID missing for {symbol}, have: {SYMBOL_IDS}")
-            return {"err": f"symbolID not loaded for {symbol}. Found: {found_name} Loaded: {list(SYMBOL_IDS.keys())[:20]}"}
-
-        logging.info(f"[SoDEX] Using {found_name} -> ID {symbol_id} for {symbol}")
-
+            return {"err": f"symbolID not loaded for {symbol}. Loaded sample: {list(SYMBOL_IDS.keys())[:15]}"}
+        logging.info(f"[SoDEX] Using {found_name} ID {symbol_id} for {symbol}")
         raw_order = {"clOrdID": f"AF-{int(datetime.now().timestamp()*1000)}","modifier": 1,"side": 1 if bias=="LONG" else 2,"type": 1,"timeInForce": 1,"price": f"{entry:.2f}","quantity": f"{qty:.4f}","reduceOnly": False,"positionSide": 1}
         params = {"accountID": int(float(self.account_id)), "symbolID": symbol_id, "orders": [raw_order]}
         action_payload = {"type": "newOrder", "params": params}
@@ -117,7 +95,7 @@ class SoDEXExecutor:
             headers = {"X-API-Key": self.api_key_name, "X-API-Sign": sig, "X-API-Nonce": str(nonce), "Content-Type": "application/json"}
             async with session.post(f"{SODEX_PERPS_URL}/trade/orders", json=params, headers=headers) as r:
                 txt = await r.text()
-                logging.info(f"[SoDEX] Place {r.status} {txt[:1000]}")
+                logging.info(f"[SoDEX] Place {r.status} {txt[:800]}")
                 if r.status in [200,201]: return {"ok": json.loads(txt) if txt else {}, "used_symbol": found_name}
                 return {"err": f"{r.status} {txt[:800]}", "used_symbol": found_name}
         except Exception as e:
