@@ -10,7 +10,7 @@ try:
 except ImportError:
     HAS_EIP712 = False
 
-# Try changing this if you get invalid signature: "SODEX", "SoDEX", "Bolt", "futures"
+# If you still get invalid signature, try: "SODEX", "SoDEX", "Bolt", "futures"
 PERPS_DOMAIN_NAME = "SODEX"
 SODEX_CHAIN_ID = 286623
 SODEX_PERPS_URL = "https://mainnet-gw.sodex.dev/api/v1/perps"
@@ -65,7 +65,7 @@ def find_symbol_id(symbol: str):
     sym = symbol.upper().strip()
     for cand in [f"{sym}-USD", f"{sym}-USDT", sym]:
         if cand in SYMBOL_IDS:
-            return SYMBOL_IDS[cand], cand
+            return SYMBOL_IDS, cand
     for k, v in SYMBOL_IDS.items():
         if k.upper().startswith(sym + "-"):
             return v, k
@@ -132,7 +132,7 @@ class SoDEXExecutor:
             "price": price_str,
             "quantity": qty_str,
             "reduceOnly": False,
-            "positionSide": 2 if bias == "LONG" else 3
+            "positionSide": 1 if bias == "LONG" else 2
         }
 
         payload = {
@@ -159,8 +159,15 @@ class SoDEXExecutor:
                 txt = await r.text()
                 logging.info(f"[SoDEX] {found_name} ID={symbol_id} {r.status} {txt[:800]}")
                 if r.status in [200, 201]:
-                    return {"ok": json.loads(txt) if txt else {}, "used_symbol": found_name}
-                return {"err": f"{r.status} {txt[:800]}"}
+                    try:
+                        data = json.loads(txt) if txt else {}
+                        # Check SODEX error inside ok
+                        if isinstance(data, dict) and data.get("error"):
+                            return {"err": f"{data.get('error')}", "used_symbol": found_name, "raw": data}
+                        return {"ok": data, "used_symbol": found_name}
+                    except:
+                        return {"ok": {"raw": txt}, "used_symbol": found_name}
+                return {"err": f"{r.status} {txt[:800]}", "used_symbol": found_name}
         except Exception as e:
             logging.exception("[SoDEX] place_order failed")
             return {"err": str(e)}
