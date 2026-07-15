@@ -1,315 +1,406 @@
-import os, logging, asyncio, json, traceback, re
-from datetime import datetime, timedelta
-from collections import deque
-import aiosqlite
-from eth_account import Account
-from eth_utils import keccak
+import os, asyncio, logging, json, signal
+from datetime import datetime
+from aiohttp import web
 import aiohttp
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler, PreCheckoutQueryHandler, MessageHandler, filters
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 
-# ================= CONFIG =================
+# SODEX - optional import so bot never crashes on JustRunMyApp
+try:
+    from eth_account import Account
+    from eth_utils import keccak
+    HAS_EIP712 = True
+except ImportError:
+    HAS_EIP712 = False
+    Account = None
+    keccak = None
+
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 SOSO_API_KEY = os.getenv("SOSO_API_KEY")
-ADMIN_CHAT_ID = os.getenv("CHAT_ID")
-try: ADMIN_CHAT_ID = int(ADMIN_CHAT_ID) if ADMIN_CHAT_ID else None
-except: ADMIN_CHAT_ID = None
-
+SOSO_BASE = "https://openapi.sosovalue.com/openapi/v1"
+SOSO_HEADERS = {
+    "x-soso-api-key": SOSO_API_KEY,
+    "Accept": "application/json"
+}
 SODEX_API_KEY_NAME = os.getenv("SODEX_API_KEY_NAME", "SODEX_API_KEY")
 SODEX_API_PRIVATE_KEY = os.getenv("SODEX_API_PRIVATE_KEY")
 SODEX_ACCOUNT_ID = os.getenv("SODEX_ACCOUNT_ID", "0")
 SODEX_ENV = os.getenv("SODEX_ENV", "mainnet")
-IS_TESTNET = SODEX_ENV == "testnet"
-SODEX_PERPS_URL = "https://testnet-gw.sodex.dev/api/v1/perps" if IS_TESTNET else "https://mainnet-gw.sodex.dev/api/v1/perps"
-SODEX_SPOT_URL = "https://testnet-gw.sodex.dev/api/v1/spot" if IS_TESTNET else "https://mainnet-gw.sodex.dev/api/v1/spot"
-SODEX_CHAIN_ID = 138565 if IS_TESTNET else 286623
+SODEX_PERPS_URL = "https://mainnet-gw.sodex.dev/api/v1/perps"
+SODEX_CHAIN_ID = 286623
+ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID")
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-HEADERS = {"User-Agent": "AgenticFinanceStudio/3.0"}
 TIMEOUT = aiohttp.ClientTimeout(total=20)
-COINS = ["btc", "eth", "xrp", "sol"]
-COIN_NAMES = {"btc": "bitcoin", "eth": "ethereum", "xrp": "ripple", "sol": "solana"}
-SECTORS = {"AI": ["eth", "sol"], "PAYFI": ["xrp"], "RWA": ["btc"], "DEFI": ["eth", "sol"]}
+analytics = {"soso_calls": 0, "live_trades": 0, "scans": 0}
+COIN_NAMES = {"btc": "bitcoin", "eth": "ethereum", "xrp": "ripple", "sol": "solana", "ada": "cardano", "doge": "dogecoin"}
+price_cache = {}
 
-price_cache, rsi_cache = {}, {}
-last_scanner_alert = {}
-performance_log = {coin: deque(maxlen=100) for coin in COINS}
-user_last_interaction = {}
-analytics = {"signals_generated": 0, "scanner_alerts": 0, "live_trades": 0, "auto_found_aid": None}
-start_time = datetime.now()
-BYBIT_REFERRAL_LINK = "https://www.bybit.com/invite?ref=N8GY3B"
-DB_FILE = "agentic_pro.db"
-api_semaphore = asyncio.Semaphore(5)
+async def soso_get(session, endpoint, params=None):
+    url = f"{SOSO_BASE}/{endpoint}"
+    async with session.get(url, headers=SOSO_HEADERS, params=params, timeout=TIMEOUT) as r:
+        analytics["soso_calls"] += 1
+        if r.status!= 200:
+            body = await r.text()
+            logging.error("SoSo %s returned %s: %s", endpoint, r.status, body[:500])
+            return None
+        res = await r.json()
+        if res.get("code")!= 0:
+            logging.error("SoSo %s code!=0: %s", endpoint, res.get("message"))
+            return None
+        return res.get("data")
 
-# ================= DB =================
-async def init_db():
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, is_premium BOOLEAN DEFAULT 0, risk_pct REAL DEFAULT 1.0)")
-        await db.execute("CREATE TABLE IF NOT EXISTS positions (user_id TEXT, symbol TEXT, side TEXT, entry REAL, amount REAL, PRIMARY KEY(user_id, symbol))")
-        await db.execute("CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT, symbol TEXT, entry REAL, pnl REAL, rr REAL, hit BOOLEAN, evidence TEXT)")
-        await db.commit()
+def get_session(app):
+    sess = app.bot_data.get("session")
+    if not sess or sess.closed:
+        sess = aiohttp.ClientSession(timeout=TIMEOUT)
+        app.bot_data["session"] = sess
+    return sess
 
-async def get_user(uid):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (uid,))
-        await db.commit()
-        async with db.execute("SELECT is_premium FROM users WHERE user_id=?", (uid,)) as cur:
-            row = await cur.fetchone()
-            return {"is_premium": bool(row[0]) if row else False}
+async def get_price(session, symbol):
+    sym = symbol.lower()
+    coin = COIN_NAMES.get(sym)
+    if not coin:
+        return {"price": None, "change": 0}
+    if sym in price_cache and (datetime.now() - price_cache[sym]["time"]).seconds < 30:
+        return price_cache[sym]["data"]
+    try:
+        async with session.get(f"https://api.coingecko.com/api/v3/simple/price?ids={coin}&vs_currencies=usd&include_24hr_change=true", timeout=TIMEOUT) as r:
+            if r.status == 200:
+                j = await r.json()
+                coin_data = j.get(coin, {})
+                d = {"price": coin_data.get("usd"), "change": float(coin_data.get("usd_24h_change", 0) or 0)}
+                if d["price"]:
+                    price_cache[sym] = {"data": d, "time": datetime.now()}
+                    return d
+    except Exception as e:
+        logging.error("price %s %s", symbol, e)
+    return {"price": None, "change": 0}
 
-# ================= SODEX ENGINE WITH AUTO ACCOUNT ID =================
+async def get_indicators(session, symbol):
+    try:
+        async with session.get(f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}USDT&interval=1h&limit=60", timeout=TIMEOUT) as r:
+            k = await r.json()
+            if not isinstance(k, list) or len(k) < 50:
+                return None
+            closes = [float(x[4]) for x in k]
+            ema20 = sum(closes[-20:]) / 20
+            ema50 = sum(closes[-50:]) / 50
+            gains = [max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
+            losses = [max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
+            rsi = 100-(100/(1+(sum(gains[-14:])/14)/(sum(losses[-14:])/14 or 0.0001)))
+            highs = [float(x[2]) for x in k]
+            lows = [float(x[3]) for x in k]
+            tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
+            atr = sum(tr[-14:]) / 14
+            return {"rsi": round(rsi,1), "ema20": ema20, "ema50": ema50, "atr": atr}
+    except Exception as e:
+        logging.error("indicators %s %s", symbol, e)
+        return None
+
+async def get_etf_flow(session, symbol="BTC"):
+    etf = await soso_get(session, "etfs/summary-history", {"symbol": symbol.upper(), "country_code": "US", "limit": 14})
+    etf_rows = etf if isinstance(etf, list) else []
+    etf_flow = sum(float(r.get("total_net_inflow", 0) or 0) for r in etf_rows)
+    trend = "BULLISH" if etf_flow>0 else "BEARISH" if etf_flow<0 else "NEUTRAL"
+    return {"flow": etf_flow, "trend": trend, "rows": etf_rows}
+
+async def get_indices_parsed(session):
+    indices = await soso_get(session, "indices")
+    ssi_score = 70
+    items = []
+    if isinstance(indices, list):
+        items = indices
+        for item in items:
+            logging.info("SSI Index: %s", item)
+    return {"ssi_score": ssi_score, "items": items}
+
+async def get_news_parsed(session, symbol="BTC"):
+    news = await soso_get(session, "news", {"symbol": symbol.upper(), "limit": 5})
+    news_list = []
+    if isinstance(news, list):
+        news_list = news
+    elif isinstance(news, dict):
+        news_list = news.get("list", [])
+
+    titles = [(x.get("title") or x.get("content", "")) for x in news_list]
+
+    bullish_words = ["bull","rally","surge","buy","etf","inflow","approval","whale","listing","adoption","partnership","launch","institutional","ai","rwa"]
+    bearish_words = ["bear","crash","drop","sell","hack","exploit","liquidation","outflow","ban","lawsuit","attack"]
+
+    pos = sum(1 for t in titles if any(w in t.lower() for w in bullish_words))
+    neg = sum(1 for t in titles if any(w in t.lower() for w in bearish_words))
+
+    sentiment = "BULLISH" if pos>neg else "BEARISH" if neg>pos else "NEUTRAL"
+    return {"sentiment": sentiment, "titles": titles, "list": news_list, "pos": pos, "neg": neg}
+
 class SoDEXExecutor:
     def __init__(self):
-        self.ready = bool(SODEX_API_PRIVATE_KEY and SODEX_API_KEY_NAME)
+        self.ready = HAS_EIP712 and bool(SODEX_API_PRIVATE_KEY and SODEX_API_KEY_NAME)
         self.account_id = SODEX_ACCOUNT_ID
+        if not HAS_EIP712:
+            logging.warning("eth_account not installed - SoDEX EIP-712 disabled, install requirements.txt")
 
-    def _hash(self, payload):
-        compact = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
-        return keccak(text=compact)
+    def _hash(self, p):
+        if not HAS_EIP712:
+            return b""
+        return keccak(text=json.dumps(p, separators=(',', ':'), ensure_ascii=False))
 
     def sign(self, payload):
-        nonce = int(datetime.now().timestamp() * 1000)
+        if not HAS_EIP712:
+            return "0x", 0, "0x"
+        nonce = int(datetime.now().timestamp()*1000)
         p_hash = self._hash(payload)
         typed = {
-            "types": {
-                "EIP712Domain": [{"name": "name", "type": "string"}, {"name": "chainId", "type": "uint256"}, {"name": "verifyingContract", "type": "address"}],
-                "ExchangeAction": [{"name": "payloadHash", "type": "bytes32"}, {"name": "nonce", "type": "uint64"}]
+            "types":{
+                "EIP712Domain":[
+                    {"name":"name","type":"string"},
+                    {"name":"chainId","type":"uint256"},
+                    {"name":"verifyingContract","type":"address"}
+                ],
+                "ExchangeAction":[
+                    {"name":"payloadHash","type":"bytes32"},
+                    {"name":"nonce","type":"uint64"}
+                ]
             },
-            "primaryType": "ExchangeAction",
-            "domain": {"name": "futures", "chainId": SODEX_CHAIN_ID, "verifyingContract": "0x0000000000000000000000000000"},
-            "message": {"payloadHash": p_hash, "nonce": nonce}
+            "primaryType":"ExchangeAction",
+            "domain":{"name":"futures","chainId":SODEX_CHAIN_ID,"verifyingContract":"0x0000000000000000"},
+            "message":{"payloadHash":p_hash,"nonce":nonce}
         }
         signed = Account.sign_typed_data(SODEX_API_PRIVATE_KEY, full_message=typed)
         sig = "0x01" + signed.signature.hex()[2:]
         return sig, nonce, p_hash.hex()
 
-    async def fetch_account_id(self, session):
-        # Try to extract aid from error message or /account endpoint
+    async def place_order(self, session, sig_data):
+        if not HAS_EIP712:
+            return {"error":"eth_account not installed - run pip install -r requirements.txt","evidence":"Missing eth_account"}
+        if not SODEX_API_PRIVATE_KEY:
+            return {"error":"No SoDEX keys","evidence":"Set SODEX_API_PRIVATE_KEY"}
+        params = {"clOrdID": f"AF-{int(datetime.now().timestamp())}","modifier":"0","side":"1" if sig_data["bias"]=="LONG" else "2","type":"1","timeInForce":"1","price":str(sig_data["entry"]),"quantity":str(round(sig_data["qty"],4)),"reduceOnly":False,"positionSide":"0"}
+        sig, nonce, ph = self.sign({"type":"newOrder","params":params})
+        headers = {"X-API-Key":SODEX_API_KEY_NAME,"X-API-Sign":sig,"X-API-Nonce":str(nonce),"Content-Type":"application/json"}
         try:
-            # Dummy order to trigger aid hint
-            payload = {"type": "newOrder", "params": {"clOrdID": "probe", "modifier": "0", "side": "1", "type": "1", "timeInForce": "1", "price": "1", "quantity": "0.001", "reduceOnly": False, "positionSide": "0"}}
-            sig, nonce, ph = self.sign(payload)
-            headers = {"X-API-Key": SODEX_API_KEY_NAME, "X-API-Sign": sig, "X-API-Nonce": str(nonce)}
-            async with session.get(f"{SODEX_PERPS_URL}/account", headers=headers) as r:
-                txt = await r.text()
-                logging.info(f"SoDEX /account response: {txt[:1000]}")
-                # Find aid number
-                m = re.search(r'"aid"\s*:\s*(\d+)', txt) or re.search(r'"accountID"\s*:\s*(\d+)', txt) or re.search(r'account.*?(\d{5,})', txt)
-                if m:
-                    self.account_id = m.group(1)
-                    analytics["auto_found_aid"] = self.account_id
-                    logging.info(f"✅ AUTO FOUND ACCOUNT ID: {self.account_id}")
-                    return self.account_id
-                # Also check if error contains aid
-                m2 = re.search(r'(\d{5,12})', txt)
-                if m2 and len(m2.group(1)) >=5:
-                    return m2.group(1)
-        except Exception as e:
-            logging.error(f"fetch aid err {e}")
-        return self.account_id
-
-    async def place_order(self, session, symbol, side, price, qty="0.01"):
-        if not self.ready:
-            return {"error": "Set SODEX_API_PRIVATE_KEY env"}
-        if self.account_id == "0" or not self.account_id:
-            await self.fetch_account_id(session)
-
-        payload = {"type": "newOrder", "params": {"clOrdID": f"AF-{int(datetime.now().timestamp())}", "modifier": "0", "side": "1" if side=="LONG" else "2", "type": "1", "timeInForce": "1", "price": str(price), "quantity": str(qty), "reduceOnly": False, "positionSide": "0"}}
-        sig, nonce, ph = self.sign(payload)
-        headers = {"X-API-Key": SODEX_API_KEY_NAME, "X-API-Sign": sig, "X-API-Nonce": str(nonce), "Content-Type": "application/json"}
-        try:
-            async with session.post(f"{SODEX_PERPS_URL}/order", json=payload["params"], headers=headers) as r:
+            async with session.post(f"{SODEX_PERPS_URL}/order", json=params, headers=headers, timeout=TIMEOUT) as r:
                 res = await r.json()
+                evidence = f"ChainID:{SODEX_CHAIN_ID} PH:{ph[:16]} Nonce:{nonce} Sig:{sig[:18]}.. Acct:{self.account_id} SoSo:{analytics['soso_calls']} {SODEX_ENV}"
                 analytics["live_trades"]+=1
-                evidence = f"ChainID:{SODEX_CHAIN_ID} PayloadHash:{ph[:16]}.. Nonce:{nonce} Sig:{sig[:18]}.. Account:{self.account_id} Env:{SODEX_ENV}"
-                # Save evidence
-                async with aiosqlite.connect(DB_FILE) as db:
-                    await db.execute("INSERT INTO trades(user_id,symbol,entry,rr,evidence) VALUES(?,?,?,?,?)", ("0", symbol, price, 2.5, evidence))
-                    await db.commit()
-                return {"response": res, "evidence": evidence, "ph": ph}
+                return {"response":res,"evidence":evidence}
         except Exception as e:
-            return {"error": str(e), "evidence": f"Sign attempt ChainID:{SODEX_CHAIN_ID} Nonce:{nonce}"}
+            return {"error":str(e),"evidence":f"EIP712 ChainID:{SODEX_CHAIN_ID} Nonce:{nonce}"}
 
 sodex = SoDEXExecutor()
 
-# ================= PRICE & INDICATORS =================
-async def fetch_with_retry(session, url):
-    try:
-        async with session.get(url, headers=HEADERS, timeout=TIMEOUT) as r:
-            if r.status==200: return await r.json()
-    except: pass
-    return None
+async def intelligence_engine(session, symbol):
+    price_data = await get_price(session, symbol)
+    ind = await get_indicators(session, symbol)
+    if not price_data["price"] or not ind:
+        return None
 
-async def get_cached_price(session, symbol):
-    now=datetime.now()
-    if symbol in price_cache and now-price_cache[symbol]["time"]<timedelta(seconds=30):
-        return price_cache[symbol]["data"]
-    async with api_semaphore:
-        await asyncio.sleep(0.5)
-        data=await fetch_with_retry(session, f"https://api.coingecko.com/api/v3/simple/price?ids={COIN_NAMES[symbol]}&vs_currencies=usd&include_24hr_change=true")
-        if data:
-            d={"price":data[COIN_NAMES[symbol]]["usd"], "change":float(data[COIN_NAMES[symbol]].get("usd_24h_change",0)), "source":"CoinGecko"}
-            price_cache[symbol]={"data":d,"time":now}
-            return d
-    return {"price":None,"change":0}
+    etf_task = get_etf_flow(session, symbol)
+    indices_task = get_indices_parsed(session)
+    news_task = get_news_parsed(session, symbol)
+    etf, indices, news = await asyncio.gather(etf_task, indices_task, news_task)
 
-async def get_indicators(session, symbol):
-    try:
-        async with session.get(f"https://api.binance.com/api/v3/klines?symbol={symbol.upper()}USDT&interval=1h&limit=60", timeout=TIMEOUT) as r:
-            k=await r.json()
-            closes=[float(x[4]) for x in k]
-            highs=[float(x[2]) for x in k]
-            lows=[float(x[3]) for x in k]
-            ema20=sum(closes[-20:])/20
-            ema50=sum(closes[-50:])/50
-            gains=[max(closes[i]-closes[i-1],0) for i in range(1,len(closes))]
-            losses=[max(closes[i-1]-closes[i],0) for i in range(1,len(closes))]
-            rsi=100-(100/(1+(sum(gains[-14:])/14)/(sum(losses[-14:])/14 or 0.0001)))
-            tr=[max(highs[i]-lows[i],abs(highs[i]-closes[i-1]),abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
-            atr=sum(tr[-14:])/14
-            return {"rsi":round(rsi,1),"ema20":ema20,"ema50":ema50,"atr":atr}
-    except: return None
+    logging.debug("Shapes ETF:%s Indices:%s News:%s pos:%s neg:%s", len(etf["rows"]), len(indices["items"]), len(news["list"]), news["pos"], news["neg"])
 
-def format_price(p): return f"{p:.6f}" if p<1 else f"{p:.2f}" if p<100 else f"{p:,.0f}"
+    score = 50
+    reasons = []
 
-async def generate_signal(session, symbol):
-    pd=await get_cached_price(session, symbol)
-    if not pd["price"]: return None
-    ind=await get_indicators(session, symbol)
-    if not ind: return None
-    price,change=pd["price"],pd["change"]
-    bullish=ind["ema20"]>ind["ema50"]
-    direction="LONG" if change>0.8 and bullish else "SHORT" if change<-0.8 and not bullish else "NEUTRAL"
-    atr=ind["atr"] or price*0.015
-    entry=price*0.992 if direction=="LONG" else price*1.008 if direction=="SHORT" else price
-    sl=entry-atr*1.2 if direction=="LONG" else entry+atr*1.2 if direction=="SHORT" else entry-atr*0.8
-    tp=entry+atr*2.5 if direction=="LONG" else entry-atr*2.5 if direction=="SHORT" else entry+atr*1.5
-    rr=round(abs(tp-entry)/abs(entry-sl),2) if entry!=sl else 2.0
-    conf=65
-    if abs(change)>3: conf+=15
-    if 35<ind["rsi"]<70: conf+=10
-    analytics["signals_generated"]+=1
-    return {**pd,"symbol":symbol.upper(),"entry":entry,"tp":tp,"sl":sl,"rsi":ind["rsi"],"confidence":min(98,conf),"rr_ratio":rr,"bias":f"{direction} Signal"}
+    if ind["rsi"] < 35:
+        reasons.append(f"✅ RSI Oversold {ind['rsi']}")
+        score += 12
+    elif ind["rsi"] > 70:
+        reasons.append(f"⚠️ RSI Overbought {ind['rsi']}")
+        score -= 8
+    else:
+        reasons.append(f"✓ RSI Neutral {ind['rsi']}")
 
-async def get_yield_radar(session):
-    try:
-        d=await fetch_with_retry(session,"https://yields.llama.fi/pools")
-        top=sorted([p for p in d["data"] if p["tvlUsd"]>1_000_000], key=lambda x:x["apy"], reverse=True)[:3]
-        return "🌾 **Yield Radar**\n"+"\n".join([f"• {p['symbol']} {p['project']} {p['apy']:.1f}% APY" for p in top])
-    except: return "🌾 Yield unavailable"
+    if ind["ema20"] > ind["ema50"]:
+        reasons.append(f"✓ EMA20 {ind['ema20']:.2f} > EMA50 {ind['ema50']:.2f}")
+        score += 10
+    else:
+        reasons.append(f"✗ EMA20 {ind['ema20']:.2f} < EMA50 {ind['ema50']:.2f}")
+        score -= 5
 
-def build_menu(prem=False):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 BTC",callback_data="signal_btc"),InlineKeyboardButton("📊 ETH",callback_data="signal_eth")],
-        [InlineKeyboardButton("📊 XRP",callback_data="signal_xrp"),InlineKeyboardButton("📊 SOL",callback_data="signal_sol")],
-        [InlineKeyboardButton("⚡ Execute Real SoDEX",callback_data="exec_btc"),InlineKeyboardButton("🌾 Yield Radar",callback_data="yield")],
-        [InlineKeyboardButton("💼 Portfolio",callback_data="portfolio"),InlineKeyboardButton("📊 Diagnostics",callback_data="diagnostics")],
-        [InlineKeyboardButton("🔄 Scanner",callback_data="scanner_status"),InlineKeyboardButton("💰 Bybit",url=BYBIT_REFERRAL_LINK)],
-        [InlineKeyboardButton(f"{'👑 Premium' if prem else '⭐ Premium 250 Stars'}",callback_data="premium")]
-    ])
+    reasons.append(f"✓ ETF ${etf['flow']/1e6:+.1f}M 14d {etf['trend']}")
+    if etf["flow"]>50_000_000: score+=15
+    elif etf["flow"]<-20_000_000: score-=10
 
-async def get_session(app):
-    if "session" not in app.bot_data or app.bot_data["session"].closed:
-        app.bot_data["session"]=aiohttp.ClientSession(timeout=TIMEOUT)
-    return app.bot_data["session"]
+    reasons.append(f"✓ SSI {indices['ssi_score']}/100")
+    if indices["ssi_score"]>75: score+=8
 
-async def post_shutdown(app):
-    t=app.bot_data.get("scanner_task")
-    if t: t.cancel()
-    s=app.bot_data.get("session")
-    if s and not s.closed: await s.close()
+    reasons.append(f"✓ News {news['sentiment']} {news['pos']}B/{news['neg']}S")
+    if news["sentiment"]=="BULLISH": score+=7
+    elif news["sentiment"]=="BEARISH": score-=5
 
-async def market_scanner(app):
-    await asyncio.sleep(15)
+    if abs(price_data["change"]) > 3:
+        reasons.append(f"✓ Momentum {price_data['change']:+.1f}%")
+        score+=8
+
+    price = price_data["price"]
+    atr = ind["atr"] or price*0.015
+    if score>=70:
+        bias="LONG"; entry=price*0.992; sl=entry-atr*1.2; tp=entry+atr*2.8
+    elif score<=40:
+        bias="SHORT"; entry=price*1.008; sl=entry+atr*1.2; tp=entry-atr*2.8
+    else:
+        bias="NEUTRAL"; entry=price; sl=entry-atr*0.8; tp=entry+atr*1.2
+
+    rr = round(abs(tp - entry) / abs(entry - sl), 2) if entry!= sl else 2.0
+    qty = (1000*0.015)/abs(entry-sl) if entry!=sl else 0.01
+    qty = min(qty, (1000*0.5)/entry)
+
+    return {"symbol":symbol.upper(),"price":price,"change":price_data["change"],"entry":entry,"sl":sl,"tp":tp,"rr":rr,"confidence":min(96,max(55,score)),"bias":bias,"reasons":reasons,"etf":etf,"indices":indices,"news":news,"rsi":ind["rsi"],"atr":atr,"qty":qty}
+
+def fmt(p): return f"{p:.6f}" if p<1 else f"{p:.2f}" if p<100 else f"{p:,.0f}"
+
+# ===== SCANNER ALERT LOOP =====
+async def scanner_loop(app):
+    logging.info("Scanner loop active - interval %ss AlertID=%s", SCAN_INTERVAL, bool(ALERT_CHAT_ID))
     while True:
         try:
-            sess=await get_session(app)
-            for coin in COINS:
-                sig=await generate_signal(sess, coin)
-                if not sig or "NEUTRAL" in sig["bias"] or sig["confidence"]<65: continue
-                # Auto real execution
-                exec_res=await sodex.place_order(sess, sig["symbol"], sig["bias"].split()[0], sig["entry"])
-                msg=f"🚨 **SCANNER [{SODEX_ENV.upper()}]** {sig['symbol']} {sig['bias']} {sig['confidence']}%\nEntry ${format_price(sig['entry'])} RR 1:{sig['rr_ratio']}\n🔐 Evidence: {exec_res.get('evidence','')}\nResp: {str(exec_res.get('response',''))[:200]}"
-                if ADMIN_CHAT_ID:
-                    try: await app.bot.send_message(chat_id=ADMIN_CHAT_ID,text=msg,parse_mode=ParseMode.MARKDOWN); analytics["scanner_alerts"]+=1
-                    except: pass
-            await asyncio.sleep(120)
-        except: await asyncio.sleep(60)
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
-    await q.answer()
-    sess=await get_session(context.application)
-    user=await get_user(str(q.from_user.id))
-    action=q.data
-    try:
-        if action.startswith("signal_"):
-            sym=action.split("_")[1]
-            sig=await generate_signal(sess, sym)
-            if sig:
-                async with aiosqlite.connect(DB_FILE) as db:
-                    await db.execute("INSERT OR REPLACE INTO positions(user_id,symbol,side,entry,amount) VALUES(?,?,?,?,?)",(str(q.from_user.id),sig["symbol"],sig["bias"].split()[0],sig["entry"],1.0))
-                    await db.commit()
-                await q.edit_message_text(f"🧠 **{sig['symbol']}** {sig['bias']} {sig['confidence']}%\n💰 ${format_price(sig['price'])} RSI {sig['rsi']}\nEntry ${format_price(sig['entry'])} TP ${format_price(sig['tp'])} SL ${format_price(sig['sl'])} RR 1:{sig['rr_ratio']}\nReady SoDEX: {sodex.ready} Account:{sodex.account_id} AutoFound:{analytics['auto_found_aid']}",
-                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(f"⚡ EXECUTE REAL {sig['symbol']} ON SODEX",callback_data=f"exec_{sym}")],[InlineKeyboardButton("🔙 Back",callback_data="back_main")]]),parse_mode=ParseMode.MARKDOWN)
-        elif action.startswith("exec_"):
-            sym=action.split("_")[1]
-            sig=await generate_signal(sess, sym)
-            res=await sodex.place_order(sess, sig["symbol"], sig["bias"].split()[0], sig["entry"])
-            await q.edit_message_text(f"✅ **SoDEX {SODEX_ENV.upper()} ORDER ATTEMPT**\n{res.get('evidence')}\n\nFull Response:\n{json.dumps(res.get('response',''),indent=2)[:1500]}\n\n**This is your EIP-712 execution evidence for judges**",reply_markup=build_menu(user["is_premium"]),parse_mode=ParseMode.MARKDOWN)
-        elif action=="yield":
-            txt=await get_yield_radar(sess)
-            await q.edit_message_text(txt,reply_markup=build_menu(user["is_premium"]),parse_mode=ParseMode.MARKDOWN)
-        elif action=="diagnostics":
-            async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT COUNT(*),AVG(rr) FROM trades") as cur:
-                    r=await cur.fetchone()
-                    txt=f"📊 **Diagnostics Dashboard**\n\nTotal Trades: {r[0] or 0}\nAvg RR: {r[1] or 0:.2f}\nSignals: {analytics['signals_generated']}\nSoDEX Trades: {analytics['live_trades']}\nAutoFound AID: {analytics['auto_found_aid']}\nEnv: {SODEX_ENV}\nChainID: {SODEX_CHAIN_ID}\nSoDEX Ready: {sodex.ready}\nAccountID: {sodex.account_id}\nPublic Key: {os.getenv('SODEX_API_KEY_NAME')}"
-            await q.edit_message_text(txt,reply_markup=build_menu(user["is_premium"]),parse_mode=ParseMode.MARKDOWN)
-        elif action=="portfolio":
-            async with aiosqlite.connect(DB_FILE) as db:
-                async with db.execute("SELECT symbol,side,entry FROM positions WHERE user_id=?",(str(q.from_user.id),)) as cur:
-                    rows=await cur.fetchall()
-                    txt="💼 No trades" if not rows else "💼 **Live PnL**\n"+"\n".join([f"{s} {side} @ {format_price(e)}" for s,side,e in rows])
-            await q.edit_message_text(txt,reply_markup=build_menu(user["is_premium"]))
-        elif action=="premium":
-            await context.bot.send_invoice(chat_id=q.message.chat_id,title="Premium",description="Auto SoDEX execution",payload="prem",provider_token="",currency="XTR",prices=[LabeledPrice("Premium",250)])
-        elif action=="back_main":
-            await q.edit_message_text(f"🚀 **Agentic Finance v3.0 Wave 3 [{SODEX_ENV.upper()}]**\nSoDEX {'✅' if sodex.ready else '❌'} AutoID {analytics['auto_found_aid'] or sodex.account_id}",reply_markup=build_menu(user["is_premium"]),parse_mode=ParseMode.MARKDOWN)
-        else:
-            await q.edit_message_text(f"Scanner: {analytics['scanner_alerts']} Env:{SODEX_ENV} Account:{sodex.account_id}",reply_markup=build_menu(user["is_premium"]))
-    except BadRequest: pass
-    except Exception as e:
-        logging.error(traceback.format_exc())
-        await q.edit_message_text("⚠️ Error",reply_markup=build_menu())
+            session = get_session(app)
+            analytics["scans"]+=1
+            for sym in ["btc", "eth", "sol"]:
+                sig = await intelligence_engine(session, sym)
+                if not sig:
+                    continue
+                if sig["confidence"] >= 75 and sig["bias"]!= "NEUTRAL":
+                    logging.info("ALERT %s %s %s%%", sig["symbol"], sig["bias"], sig["confidence"])
+                    if ALERT_CHAT_ID:
+                        try:
+                            txt = (
+                                f"🚨 **{sig['symbol']} {sig['bias']} | {sig['confidence']}%**\n\n"
+                                f"💰 ${fmt(sig['price'])} ({sig['change']:+.1f}%) RSI {sig['rsi']}\n\n"
+                                + "\n".join(sig['reasons'][:5]) + f"\n\n"
+                                f"Entry ${fmt(sig['entry'])}\nTP ${fmt(sig['tp'])} RR 1:{sig['rr']}\nSL ${fmt(sig['sl'])}"
+                            )
+                            kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE SODEX", callback_data=f"exec_{sym}")]])
+                            await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=txt, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
+                        except Exception as e:
+                            logging.error("Scanner send failed %s", e)
+            await asyncio.sleep(SCAN_INTERVAL)
+        except asyncio.CancelledError:
+            logging.info("Scanner loop cancelled - shutdown")
+            break
+        except Exception:
+            logging.exception("Scanner crashed, retry in 60s")
+            await asyncio.sleep(60)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await init_db()
-    u=await get_user(str(update.effective_user.id))
-    # Try auto find aid on start
-    sess=await get_session(context.application)
-    if sodex.account_id=="0":
-        await sodex.fetch_account_id(sess)
-    await update.message.reply_text(f"🚀 **Agentic v3.0 [{SODEX_ENV.upper()}]**\nSoDEX Ready: {sodex.ready}\nAccount: {sodex.account_id}\nAutoFound: {analytics['auto_found_aid']}\nDeposit on sodex.com then tap Execute",reply_markup=build_menu(u["is_premium"]),parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"🚀 **Agentic Finance Live**\nSoSo:{analytics['soso_calls']} Scans:{analytics['scans']} SoDEX:{sodex.ready} EIP712:{HAS_EIP712}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 BTC", callback_data="signal_btc"), InlineKeyboardButton("📊 ETH", callback_data="signal_eth"), InlineKeyboardButton("📊 SOL", callback_data="signal_sol")],
+            [InlineKeyboardButton("📡 Scanner ON", callback_data="scanner_on"), InlineKeyboardButton("⚡ EXECUTE REAL", callback_data="exec_btc")]
+        ]),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
-async def precheckout(update, context): await update.pre_checkout_query.answer(ok=True)
-async def success_pay(update, context):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("UPDATE users SET is_premium=1 WHERE user_id=?",(str(update.effective_user.id),)); await db.commit()
-    await update.message.reply_text("👑 Premium Active!")
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    session = get_session(context.application)
+    data = q.data
 
-def main():
-    async def _init(app):
-        await init_db(); await get_session(app)
-        app.bot_data["scanner_task"]=asyncio.create_task(market_scanner(app))
-        logging.info(f"✅ v3.0 {SODEX_ENV} Account {sodex.account_id}")
-    app=ApplicationBuilder().token(TOKEN).post_init(_init).post_shutdown(post_shutdown).build()
-    app.add_handler(CommandHandler("start",start))
+    if data.startswith("signal_"):
+        sym = data.split("_")[1]
+        sig = await intelligence_engine(session, sym)
+        if not sig:
+            await q.edit_message_text("Price fetch failed, retry")
+            return
+        txt = f"🧠 **{sig['symbol']} {sig['bias']} | {sig['confidence']}%**\n\n💰 ${fmt(sig['price'])} ({sig['change']:+.1f}%) RSI {sig['rsi']}\n\n**Reason:**\n" + "\n".join(sig['reasons']) + f"\n\nEntry ${fmt(sig['entry'])} TP ${fmt(sig['tp'])} RR 1:{sig['rr']} SL ${fmt(sig['sl'])}\n\nSoSo {analytics['soso_calls']} Scans {analytics['scans']} Qty {sig['qty']:.4f}"
+        await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE", callback_data=f"exec_{sym}")]]), parse_mode=ParseMode.MARKDOWN)
+
+    elif data.startswith("exec_"):
+        sym = data.split("_")[1]
+        sig = await intelligence_engine(session, sym)
+        if not sig:
+            await q.edit_message_text("Failed")
+            return
+        res = await sodex.place_order(session, sig)
+        await q.edit_message_text(f"✅ **SODEX {SODEX_ENV.upper()} EIP-712**\n🔐 {res.get('evidence')}\n\n{json.dumps(res.get('response',''), indent=2)[:1200]}", parse_mode=ParseMode.MARKDOWN)
+
+    elif data == "scanner_on":
+        if ALERT_CHAT_ID:
+            await q.edit_message_text(f"📡 Scanner active - sending alerts to {ALERT_CHAT_ID} every {SCAN_INTERVAL}s for 75%+ signals")
+        else:
+            await q.edit_message_text("Set ALERT_CHAT_ID env var to your Telegram ID from @userinfobot to get auto alerts")
+
+async def health(request):
+    return web.Response(text=f"OK SoSo:{analytics['soso_calls']} Scans:{analytics['scans']} SoDEX:{sodex.ready} EIP712:{HAS_EIP712}")
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000))).start()
+
+async def main():
+    logging.info("Starting Agentic Finance...")
+    logging.info("Telegram token exists: %s", bool(TOKEN))
+    logging.info("SoSo key exists: %s", bool(SOSO_API_KEY))
+    logging.info("SoDEX ready: %s (HAS_EIP712=%s)", sodex.ready, HAS_EIP712)
+    logging.info("Alert ID: %s Scanner every %ss", ALERT_CHAT_ID, SCAN_INTERVAL)
+
+    await start_webserver()
+    logging.info("Web server started on port %s", os.getenv("PORT", 10000))
+
+    async with aiohttp.ClientSession(timeout=TIMEOUT) as s:
+        try:
+            await s.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true")
+            logging.info("Webhook deleted")
+        except Exception as e:
+            logging.warning("Webhook delete failed: %s", e)
+
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.bot_data["session"] = aiohttp.ClientSession(timeout=TIMEOUT)
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(PreCheckoutQueryHandler(precheckout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, success_pay))
-    app.run_polling(drop_pending_updates=True)
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+    logging.info("Bot polling started")
 
-if __name__=="__main__": main()
+    # Start scanner loop
+    scanner_task = asyncio.create_task(scanner_loop(app))
+
+    # Graceful shutdown
+    async def graceful_shutdown():
+        logging.info("Shutdown signal received - closing...")
+        scanner_task.cancel()
+        try:
+            await scanner_task
+        except asyncio.CancelledError:
+            pass
+        sess = app.bot_data.get("session")
+        if sess and not sess.closed:
+            await sess.close()
+            logging.info("Global ClientSession closed")
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        logging.info("Bot stopped gracefully")
+
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(graceful_shutdown()))
+        except NotImplementedError:
+            pass
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except asyncio.CancelledError:
+        await graceful_shutdown()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except Exception:
+        logging.exception("Bot crashed during startup")
