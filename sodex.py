@@ -26,7 +26,7 @@ def next_nonce() -> int:
 
 def clean_priv(k: str) -> str:
     if not k:
-        raise ValueError("Private key empty - set SODEX_API_PRIVATE_KEY")
+        raise ValueError("Private key empty")
     k = k.strip().replace("\n","").replace(" ","").replace("\r","")
     if k.startswith("0x0x"):
         k = k[2:]
@@ -45,7 +45,6 @@ async def load_symbols(session):
         async with session.get(url) as r:
             txt = await r.text()
             if r.status!= 200:
-                logging.warning(f"[SoDEX] load_symbols status {r.status}")
                 return
             j = json.loads(txt)
             data = j.get("data", j) if isinstance(j, dict) else j
@@ -55,10 +54,7 @@ async def load_symbols(session):
                 sid = item.get("symbolID") or item.get("id")
                 sym = item.get("symbol") or item.get("displayName") or item.get("name")
                 if sid and sym:
-                    try:
-                        SYMBOL_IDS[sym.strip()] = int(sid)
-                    except:
-                        pass
+                    SYMBOL_IDS[sym.strip()] = int(sid)
             logging.info(f"[SoDEX] Loaded {len(SYMBOL_IDS)} symbols")
     except Exception:
         logging.exception("[SoDEX] load_symbols failed")
@@ -118,8 +114,7 @@ class SoDEXExecutor:
         }
         key = clean_priv(self.private_key_raw)
         signed = Account.sign_typed_data(key, full_message=typed)
-        sig = "0x" + (b"\x01" + signed.signature).hex()
-        return sig
+        return "0x" + (b"\x01" + signed.signature).hex()
 
     async def place_order(self, session, symbol: str, bias: str, entry: float, qty: float):
         if not self.ready:
@@ -136,14 +131,14 @@ class SoDEXExecutor:
 
         order = {
             "clOrdID": f"AF-{nonce}",
-            "modifier": "NORMAL",
-            "side": "BUY" if bias == "LONG" else "SELL",
-            "type": "LIMIT",
-            "timeInForce": "GTC",
+            "modifier": 1,
+            "side": 1 if bias == "LONG" else 2,
+            "type": 1,
+            "timeInForce": 1,
             "price": price_str,
             "quantity": qty_str,
             "reduceOnly": False,
-            "positionSide": "LONG" if bias == "LONG" else "SHORT"
+            "positionSide": 2 if bias == "LONG" else 3
         }
 
         payload = {
@@ -181,38 +176,4 @@ class SoDEXExecutor:
                 return {"err": f"{r.status} {txt[:800]}", "used_symbol": found_name}
         except Exception as e:
             logging.exception("[SoDEX] place_order failed")
-            return {"err": str(e)}
-
-    async def cancel_order(self, session, symbol: str, order_id: int = None, cl_ord_id: str = None):
-        if not self.ready:
-            return {"err": "SoDEX not configured"}
-        try:
-            symbol_id, found_name = find_symbol_id(symbol)
-            if symbol_id is None:
-                return {"err": "symbolID not loaded"}
-            nonce = next_nonce()
-            cancel = {"symbolID": symbol_id}
-            if order_id is not None:
-                cancel["orderID"] = int(order_id)
-            if cl_ord_id is not None:
-                cancel["clOrdID"] = cl_ord_id
-            payload = {"accountID": int(float(self.account_id)), "cancels": [cancel]}
-            action_payload = {"type": "cancelOrder", "params": payload}
-            sig = self.sign(action_payload, nonce)
-            headers = {
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-                "X-API-Sign": sig,
-                "X-API-Nonce": str(nonce),
-                "X-API-Chain": str(SODEX_CHAIN_ID),
-            }
-            if self.api_key_name:
-                headers["X-API-Key"] = self.api_key_name
-            async with session.delete(f"{SODEX_PERPS_URL}/trade/orders", json=payload, headers=headers) as r:
-                txt = await r.text()
-                if r.status in [200, 201, 204]:
-                    return {"ok": json.loads(txt) if txt else {}}
-                return {"err": f"{r.status} {txt[:800]}"}
-        except Exception as e:
-            logging.exception("[SoDEX] cancel_order failed")
             return {"err": str(e)}
