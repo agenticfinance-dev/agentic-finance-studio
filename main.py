@@ -14,11 +14,10 @@ SODEX_API_KEY_NAME = os.getenv("SODEX_API_KEY_NAME", os.getenv("SODEX_API_KEY","
 SODEX_API_PRIVATE_KEY = os.getenv("SODEX_API_PRIVATE_KEY", os.getenv("SODEX_PRIVATE_KEY",""))
 SODEX_ACCOUNT_ID = os.getenv("SODEX_ACCOUNT_ID", "0")
 ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID")
-SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 TIMEOUT = aiohttp.ClientTimeout(total=20)
-analytics = {"soso_calls": 0, "live_trades": 0, "scans": 0, "signals": 2551, "alerts": 151}
+analytics = {"soso_calls": 0, "live_trades": 0, "signals": 2551, "alerts": 151}
 start_time = datetime.now()
 
 COIN_NAMES = {"btc":"bitcoin","eth":"ethereum","bnb":"binancecoin","xrp":"ripple","sol":"solana"}
@@ -121,12 +120,10 @@ async def intelligence_engine(session, symbol):
     ind = await get_indicators(session, symbol)
     if not price_data["price"]: return None
     score = 50; reasons=[]; checks=[]
-
     if ind["vol_spike"]:
         checks.append("✅ Volume Spike"); score+=10; vol_reason = "Volume spike confirms buying interest"
     else:
         checks.append("❌ No volume confirmation"); vol_reason = "No significant volume"
-
     if ind["rsi"] < 35:
         reasons.append(f"• RSI oversold {ind['rsi']} indicates potential bottom")
         checks.append(f"✅ RSI oversold {ind['rsi']}"); score+=12
@@ -136,7 +133,6 @@ async def intelligence_engine(session, symbol):
     else:
         reasons.append(f"• RSI neutral {ind['rsi']} - waiting for momentum shift")
         checks.append(f"⚠️ RSI not oversold {ind['rsi']}")
-
     if ind["ema20"] and ind["ema50"]:
         if ind["ema20"] > ind["ema50"]:
             reasons.append("• Price above EMA50 - uptrend confirmed")
@@ -147,11 +143,9 @@ async def intelligence_engine(session, symbol):
     else:
         reasons.append("• EMA trend neutral - consolidation phase")
         checks.append("⚠️ EMA neutral")
-
     reasons.append(f"• Pullback {'not ' if ind['rsi']>45 else ''}in optimal zone")
     reasons.append(f"• {vol_reason}")
     reasons.append(f"• {'Bullish' if score>55 else 'Bearish' if score<45 else 'Neutral'} confirmation candle")
-
     price = price_data["price"]; atr = ind["atr"] or price*0.015
     if score>=70: bias="LONG"; entry=price*0.992; sl=entry-atr*1.2; tp=entry+atr*2.8
     elif score<=40: bias="SHORT"; entry=price*1.008; sl=entry+atr*1.2; tp=entry-atr*2.8
@@ -164,20 +158,14 @@ def fmt(p): return f"{p:.6f}" if p<1 else f"{p:.2f}" if p<100 else f"{p:,.0f}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - start_time; hours = uptime.total_seconds()/3600
-    await update.message.reply_text(
-        f"🚀 Agentic Finance Live\n📊 Live Stats\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {int(hours//24)}d {int(hours%24)}h\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}",
-        reply_markup=main_menu_kb())
+    await update.message.reply_text(f"🚀 Agentic Finance Live\n📊 Live Stats\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {int(hours//24)}d {int(hours%24)}h\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}", reply_markup=main_menu_kb())
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     session = get_session(context.application); data = q.data
-
     if data == "back_main":
         uptime = datetime.now() - start_time; hours = uptime.total_seconds()/3600
-        await q.edit_message_text(
-            f"🚀 Agentic Finance Live\n📊 Live Stats\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {int(hours//24)}d {int(hours%24)}h\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}",
-            reply_markup=main_menu_kb()); return
-
+        await q.edit_message_text(f"🚀 Agentic Finance Live\n📊 Live Stats\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {int(hours//24)}d {int(hours%24)}h\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}", reply_markup=main_menu_kb()); return
     if data.startswith("signal_"):
         sym = data.split("_")[1]
         sig = await intelligence_engine(session, sym)
@@ -187,21 +175,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = f"📊 {sig['symbol']} {sig['bias']} | {sig['confidence']}%\n\n💰 ${fmt(sig['price'])} ({sig['change']:+.1f}%) | {sig['source']}\n\n" + "\n".join(sig['checks']) + "\n\nReasoning:\n" + "\n".join(sig['reasons']) + f"\n\nEntry: ${fmt(sig['entry'])} | TP: {fmt(sig['tp'])} | SL: {fmt(sig['sl'])}\nRR: {sig['rr']} | RSI: {sig['rsi']}\nSource: {sig['source']} | Hold: 1-3 days"
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE SODEX", callback_data=f"exec_{sym}")],[InlineKeyboardButton("⬅️ Back", callback_data="back_main")]])
         await q.edit_message_text(txt, reply_markup=kb)
-
     elif data.startswith("exec_"):
         sym = data.split("_")[1]
         await q.edit_message_text(f"⏳ Analyzing {sym.upper()}...", reply_markup=back_kb())
         sig = await intelligence_engine(session, sym)
         if not sig:
             await q.edit_message_text("❌ Failed to get signal", reply_markup=back_kb()); return
-
         if sig["bias"] == "NEUTRAL":
-            await q.edit_message_text(
-                f"⚠️ No trade executed. Signal is NEUTRAL.\n\n{sig['symbol']} | {sig['confidence']}%\n" + "\n".join(sig['checks']),
-                reply_markup=back_kb()
-            )
-            return
-
+            await q.edit_message_text(f"⚠️ No trade executed. Signal is NEUTRAL.\n\n{sig['symbol']} | {sig['confidence']}%\n" + "\n".join(sig['checks']), reply_markup=back_kb()); return
         await q.edit_message_text(f"⏳ Executing {sig['symbol']} {sig['bias']} on SoDEX...", reply_markup=back_kb())
         try:
             res = await sodex.place_order(session, sym, sig["bias"], sig["entry"], sig["qty"])
@@ -211,7 +192,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             analytics["live_trades"]+=1
         except Exception as e:
             await q.edit_message_text(f"❌ SODEX Error: {str(e)[:500]}", reply_markup=back_kb())
-
     elif data == "sectors":
         await q.edit_message_text("🗺 Sectors\n\nDeFi: BULLISH (+2.1%)\nAI: BULLISH (+4.5%)\nRWA: NEUTRAL\nMeme: BEARISH (-1.2%)", reply_markup=back_kb())
     elif data == "whales":
@@ -235,7 +215,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "stats":
         await q.edit_message_text(f"📊 Live Stats\n\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {datetime.now()-start_time}", reply_markup=back_kb())
     elif data == "scanner_on":
-        await q.edit_message_text(f"📡 Scanner active - {ALERT_CHAT_ID} every {SCAN_INTERVAL}s for 75%+ signals\nCoins: {', '.join([c.upper() for c in ALL_COINS])}", reply_markup=back_kb())
+        await q.edit_message_text(f"📡 Scanner active every {SCAN_INTERVAL}s for 75%+ signals\nCoins: {', '.join([c.upper() for c in ALL_COINS])}", reply_markup=back_kb())
     elif data == "portfolio":
         await q.edit_message_text("💼 Portfolio\n\nNo open positions (connect SoDEX to view)", reply_markup=back_kb())
     elif data == "inst_flow":
@@ -263,46 +243,31 @@ async def start_webserver():
 async def main():
     logging.info("===== BOT STARTING =====")
     await start_webserver()
-
     shared_session = aiohttp.ClientSession(timeout=TIMEOUT)
-
     try:
         logging.info("===== LOADING SODEX SYMBOLS =====")
         await load_symbols(shared_session)
         logging.info(f"===== SYMBOLS: {SYMBOL_IDS} =====")
         logging.info(f"===== SYMBOLS COUNT: {len(SYMBOL_IDS)} =====")
-
         try:
-            async with shared_session.get(
-                f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true",
-                timeout=TIMEOUT
-            ) as r:
+            async with shared_session.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=TIMEOUT) as r:
                 txt = await r.text()
                 logging.info(f"Delete webhook: {txt[:200]}")
         except Exception as e:
             logging.warning(f"deleteWebhook failed: {e}")
-
         await asyncio.sleep(2)
-
     except Exception as e:
         logging.exception(f"Startup failed: {e}")
-
     app = ApplicationBuilder().token(TOKEN).build()
     app.bot_data["session"] = shared_session
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
-
     await app.initialize()
     await app.start()
-
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
-    except:
-        pass
-
+    except: pass
     logging.info("===== BOT POLLING STARTED =====")
-
     try:
         await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
         while True:
@@ -318,8 +283,7 @@ async def main():
             await app.updater.stop()
             await app.stop()
             await app.shutdown()
-        except:
-            pass
+        except: pass
         await shared_session.close()
 
 if __name__ == "__main__":
