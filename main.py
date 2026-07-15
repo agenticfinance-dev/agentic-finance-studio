@@ -23,7 +23,6 @@ SOSO_HEADERS = {"x-soso-api-key": SOSO_API_KEY, "Accept": "application/json"}
 SODEX_API_KEY_NAME = os.getenv("SODEX_API_KEY_NAME")
 SODEX_API_PRIVATE_KEY = os.getenv("SODEX_API_PRIVATE_KEY")
 SODEX_ACCOUNT_ID = os.getenv("SODEX_ACCOUNT_ID", "0")
-SODEX_ENV = os.getenv("SODEX_ENV", "mainnet")
 SODEX_PERPS_URL = "https://mainnet-gw.sodex.dev/api/v1/perps"
 SODEX_CHAIN_ID = 286623
 ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID")
@@ -51,12 +50,13 @@ def fmt(p):
     return f"{p:.6f}" if p<1 else f"{p:.2f}" if p<100 else f"{p:,.2f}"
 
 async def soso_get(session, endpoint, params=None):
-    if not SOSO_API_KEY: return None
+    if not SOSO_API_KEY:
+        return None
     url = f"{SOSO_BASE}/{endpoint}"
     try:
         async with session.get(url, headers=SOSO_HEADERS, params=params, timeout=TIMEOUT) as r:
             if r.status!= 200:
-                logging.warning(f"SoSo {endpoint} {r.status}")
+                logging.warning(f"SoSo {endpoint} HTTP {r.status}")
                 return None
             res = await r.json()
             if res.get("code")!= 0:
@@ -70,13 +70,13 @@ async def soso_get(session, endpoint, params=None):
 
 async def get_price(session, symbol):
     sym = symbol.upper()
-    # 1. PRIMARY SoSoValue
+    # PRIMARY SoSoValue
     try:
         data = await soso_get(session, "tokens/price-history", {"symbol": sym, "interval": "1d", "limit": 1})
         if data and isinstance(data, list) and len(data)>0 and data[0].get("close"):
             return {"price": float(data[0]["close"]), "change": float(data[0].get("change",0) or 0), "source": "SoSoValue"}
     except: pass
-    # 2. SECONDARY Binance
+    # SECONDARY Binance
     for url in [f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT", f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT"]:
         try:
             async with session.get(url, timeout=TIMEOUT) as r:
@@ -85,7 +85,7 @@ async def get_price(session, symbol):
                     if j.get("lastPrice"):
                         return {"price": float(j["lastPrice"]), "change": float(j.get("priceChangePercent",0)), "source": "Binance"}
         except: continue
-    # 3. TERTIARY CoinGecko
+    # TERTIARY CoinGecko
     coin = COIN_NAMES.get(sym.lower())
     if coin:
         try:
@@ -131,57 +131,70 @@ async def get_etf_flow(session, symbol="BTC"):
 class SoDEXExecutor:
     def __init__(self):
         self.ready = HAS_EIP712 and bool(SODEX_API_PRIVATE_KEY and SODEX_API_KEY_NAME)
-        logging.info(f"SoDEX ready:{self.ready} HAS_EIP712:{HAS_EIP712} KeyName:{bool(SODEX_API_KEY_NAME)} Priv:{bool(SODEX_API_PRIVATE_KEY)} Chain:{SODEX_CHAIN_ID}")
+        logging.info(f"SoDEX ready:{self.ready} EIP712:{HAS_EIP712} Chain:{SODEX_CHAIN_ID}")
     def _hash(self, p):
         return keccak(text=json.dumps(p, separators=(',', ':'), ensure_ascii=False))
     def sign(self, payload):
         nonce = int(datetime.now().timestamp()*1000)
         p_hash = self._hash(payload)
-        # FIXED DOMAIN - Sodex spec
         typed = {
             "types": {
-                "EIP712Domain": [{"name":"name","type":"string"},{"name":"chainId","type":"uint256"},{"name":"verifyingContract","type":"address"}],
-                "ExchangeAction": [{"name":"payloadHash","type":"bytes32"},{"name":"nonce","type":"uint64"}]
+                "EIP712Domain": [
+                    {"name":"name","type":"string"},
+                    {"name":"version","type":"string"},
+                    {"name":"chainId","type":"uint256"},
+                    {"name":"verifyingContract","type":"address"}
+                ],
+                "ExchangeAction": [
+                    {"name":"payloadHash","type":"bytes32"},
+                    {"name":"nonce","type":"uint64"}
+                ]
             },
             "primaryType": "ExchangeAction",
-            "domain": {"name":"Sodex","chainId":SODEX_CHAIN_ID,"verifyingContract":"0x0000000000000000000000000"},
-            "message": {"payloadHash":p_hash,"nonce":nonce}
+            "domain": {
+                "name": "Sodex",
+                "version": "1",
+                "chainId": SODEX_CHAIN_ID,
+                "verifyingContract": "0x0000000000000000000000000000000000000000"
+            },
+            "message": {"payloadHash": p_hash, "nonce": nonce}
         }
-        key = SODEX_API_PRIVATE_KEY if SODEX_API_PRIVATE_KEY.startswith("0x") else "0x"+SODEX_API_PRIVATE_KEY
+        key = SODEX_API_PRIVATE_KEY.strip()
+        if not key.startswith("0x"): key = "0x"+key
         signed = Account.sign_typed_data(key, full_message=typed)
         sig = "0x01" + signed.signature.hex()[2:]
         return sig, nonce, p_hash.hex()
     async def place_order(self, session, sig_data):
         if not self.ready:
-            return {"error": f"SoDEX not configured HAS_EIP712={HAS_EIP712} API_KEY_NAME={bool(SODEX_API_KEY_NAME)} PRIV={bool(SODEX_API_PRIVATE_KEY)}"}
+            return {"error": f"SoDEX not configured HAS_EIP712={HAS_EIP712}"}
         try:
             qty = round(float(sig_data["qty"]), 4)
-            if qty <=0: qty = 0.01
+            if qty <= 0: qty = 0.001
             params = {
-                "accountId": int(SODEX_ACCOUNT_ID),
+                "accountId": str(int(float(SODEX_ACCOUNT_ID))),
                 "clOrdId": f"AF-{int(datetime.now().timestamp()*1000)}",
                 "symbol": f"{sig_data['symbol']}-USDT-PERP",
                 "side": 1 if sig_data["bias"]=="LONG" else 2,
                 "orderType": 1,
                 "timeInForce": 1,
-                "price": str(sig_data["entry"]),
-                "quantity": str(qty)
+                "price": f"{sig_data['entry']:.2f}",
+                "quantity": f"{qty:.4f}"
             }
             sig, nonce, ph = self.sign(params)
             headers = {"X-API-KEY": SODEX_API_KEY_NAME, "X-API-SIGN": sig, "X-API-NONCE": str(nonce), "Content-Type": "application/json"}
-            logging.info(f"SoDEX placing {params['symbol']} {params['side']} qty {qty} nonce {nonce}")
+            logging.info(f"SoDEX ORDER {params} NONCE {nonce}")
             async with session.post(f"{SODEX_PERPS_URL}/order", json=params, headers=headers, timeout=TIMEOUT) as r:
                 txt = await r.text()
                 try: res = json.loads(txt)
-                except: res = {"raw": txt, "status": r.status}
-                logging.info(f"SoDEX resp {r.status} {txt[:500]}")
+                except: res = {"raw": txt[:500], "status": r.status}
+                logging.info(f"SoDEX RESP {r.status} {txt[:800]}")
                 if r.status in [200,201]:
                     analytics["live_trades"]+=1
-                    return {"response": res, "evidence": f"Chain:{SODEX_CHAIN_ID} Nonce:{nonce} PH:{ph[:10]} SoSo:{analytics['soso_calls']}"}
+                    return {"response": res, "evidence": f"Chain:{SODEX_CHAIN_ID} Nonce:{nonce} PH:{ph[:8]} SoSo:{analytics['soso_calls']}"}
                 else:
-                    return {"error": f"{r.status} {txt[:800]}", "evidence": f"Chain:{SODEX_CHAIN_ID} Nonce:{nonce}"}
+                    return {"error": f"{r.status} {txt[:800]}", "evidence": f"Nonce:{nonce}"}
         except Exception as e:
-            logging.exception("SoDEX exec")
+            logging.exception("SoDEX exec fail")
             return {"error": str(e), "evidence": "sign error"}
 
 sodex = SoDEXExecutor()
@@ -228,7 +241,7 @@ async def scanner_loop(app):
                 if sig and sig["confidence"] >= 75 and sig["bias"]!="NEUTRAL" and ALERT_CHAT_ID:
                     txt = f"🚨 {sig['symbol']} {sig['bias']} | {sig['confidence']}%\n💰 ${fmt(sig['price'])} [{sig['source']}]\n\n" + "\n".join(sig['checks'])
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE", callback_data=f"exec_{sym}")]])
-                    try: await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=txt, reply_markup=kb, parse_mode=ParseMode.MARKDOWN); analytics["live_trades"]+=0
+                    try: await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=txt, reply_markup=kb, parse_mode=ParseMode.MARKDOWN)
                     except: pass
             await asyncio.sleep(SCAN_INTERVAL)
         except asyncio.CancelledError: break
@@ -242,7 +255,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗺 Sector Map", callback_data="sector_map"), InlineKeyboardButton("🐋 Whale Radar", callback_data="whale_radar")],
         [InlineKeyboardButton("📡 Scanner", callback_data="scanner_on"), InlineKeyboardButton("🏭 INST FLOW", callback_data="inst_flow")],
     ]
-    await update.message.reply_text(f"🚀 **Agentic Finance**\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} EIP712:{HAS_EIP712}\nKey:{bool(SOSO_API_KEY)}", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"🚀 **Agentic Finance Live**\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} EIP712:{HAS_EIP712}\nKey:{bool(SOSO_API_KEY)}", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -256,14 +269,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🗺 Sector Map", callback_data="sector_map"), InlineKeyboardButton("🐋 Whale Radar", callback_data="whale_radar")],
             [InlineKeyboardButton("📡 Scanner", callback_data="scanner_on"), InlineKeyboardButton("🏭 INST FLOW", callback_data="inst_flow")],
         ]
-        await q.edit_message_text(f"🚀 **Agentic Finance**\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} EIP712:{HAS_EIP712}", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text(f"🚀 **Agentic Finance Live**\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} EIP712:{HAS_EIP712}", reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.MARKDOWN)
         return
 
     if data.startswith("signal_"):
         sym = data.split("_")[1]
         sig = await intelligence_engine(session, sym)
         if not sig:
-            await q.edit_message_text("Failed - all 3 fallbacks failed", reply_markup=back_kb())
+            await q.edit_message_text("Failed - all fallbacks SoSo->Binance->CoinGecko failed", reply_markup=back_kb())
             return
         txt = f"💰 ${fmt(sig['price'])} ({sig['change']:+.2f}%) | {sig['source']}\n\n" + "\n".join(sig['checks']) + "\n\n" + "\n".join(sig['reasons']) + f"\n\nEntry ${fmt(sig['entry'])} | TP ${fmt(sig['tp'])} | SL ${fmt(sig['sl'])}"
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ EXECUTE SODEX", callback_data=f"exec_{sym}")],[InlineKeyboardButton("⬅️ Back", callback_data="home")]]), parse_mode=ParseMode.MARKDOWN)
@@ -273,43 +286,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sig = await intelligence_engine(session, sym)
         if not sig:
             await q.edit_message_text("No signal", reply_markup=back_kb()); return
-        await q.edit_message_text(f"⏳ Executing {sym.upper()} on SoDEX EIP712...")
+        await q.edit_message_text(f"⏳ Executing {sym.upper()} on SoDEX EIP712 Chain {SODEX_CHAIN_ID}...")
         res = await sodex.place_order(session, sig)
         if "error" in res:
             await q.edit_message_text(f"❌ **SoDEX Failed**\n{res['error'][:800]}\n\n{res.get('evidence','')}", reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
         else:
             await q.edit_message_text(f"✅ **Executed**\n{json.dumps(res['response'], indent=2)[:800]}\n\n{res['evidence']}", reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
 
-    elif data == "sectors" or data == "sector_map":
-        sectors = await soso_get(session, "sector/market", {})
-        if sectors and isinstance(sectors, list):
-            txt = "🗺 **Sectors (SoSoValue)**\n\n"
-            for s in sectors[:8]:
-                txt += f"{s.get('sector','')} {s.get('change_24h','')}\n"
+    elif data in ["sectors","sector_map"]:
+        sectors = await soso_get(session, "sectors", {}) or await soso_get(session, "sector/list", {}) or await soso_get(session, "token/categories", {}) or await soso_get(session, "indices", {})
+        if sectors and isinstance(sectors, list) and len(sectors)>0:
+            txt = "🗺 **Sectors (Live SoSoValue)**\n\n"
+            for s in sectors[:10]:
+                name = s.get('name') or s.get('sector') or s.get('category') or s.get('symbol') or 'Sector'
+                chg = s.get('change_24h') or s.get('change') or s.get('price_change_24h') or s.get('change_24h_percent') or 0
+                txt += f"• {name}: {chg}%\n"
             await q.edit_message_text(txt, reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
         else:
-            await q.edit_message_text("🗺 Sectors - no data", reply_markup=back_kb())
+            try:
+                async with session.get("https://api.coingecko.com/api/v3/coins/categories?order=market_cap_desc", timeout=TIMEOUT) as r:
+                    if r.status==200:
+                        j=await r.json()
+                        txt="🗺 **Sectors (Live CoinGecko)**\n\n"
+                        for c in j[:10]:
+                            txt+=f"• {c['name']}: {c.get('market_cap_change_24h',0):.2f}%\n"
+                        await q.edit_message_text(txt, reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
+                        return
+            except: pass
+            await q.edit_message_text("🗺 Sectors - SoSo rate limited, retry in 60s", reply_markup=back_kb())
 
     elif data in ["whales","whale_radar"]:
-        whales = await soso_get(session, "whales/transactions", {"limit":5})
-        if whales and isinstance(whales, list):
-            txt = "🐋 **Whale Radar (SoSoValue)**\n\n"
+        whales = await soso_get(session, "whale/alert", {"limit":5}) or await soso_get(session, "whales/transactions", {"limit":5}) or await soso_get(session, "token/whale-activity", {"limit":5})
+        if whales and isinstance(whales, list) and len(whales)>0:
+            txt = "🐋 **Whale Radar (Live SoSoValue)**\n\n"
             for w in whales[:5]:
-                txt += f"{w.get('symbol','')} {w.get('amount','')}\n"
+                sym = w.get('symbol') or w.get('coin') or ''
+                amt = w.get('amount') or w.get('value') or w.get('usd_value') or ''
+                txt += f"• {sym} {amt}\n"
             await q.edit_message_text(txt, reply_markup=back_kb())
         else:
-            await q.edit_message_text("🐋 No whale data", reply_markup=back_kb())
+            await q.edit_message_text("🐋 Whale Radar - no live data, SoSo rate limit", reply_markup=back_kb())
 
     elif data == "etf_flows":
         etf = await get_etf_flow(session, "BTC")
-        await q.edit_message_text(f"📈 **ETF Flows 14d**\nBTC ${etf['flow']/1e6:+.2f}M {etf['trend']}\nSoSoValue", reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text(f"📈 **ETF Flows 14d (Live SoSoValue)**\n\nBTC ${etf['flow']/1e6:+.2f}M {etf['trend']}", reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
 
     elif data == "gas":
         try:
             async with session.get("https://api.bscscan.com/api?module=gastracker&action=gasoracle", timeout=TIMEOUT) as r:
                 j = await r.json()
                 price = j.get("result", {}).get("FastGasPrice", "N/A")
-                await q.edit_message_text(f"⛽ **BNB Gas** {price} Gwei (BscScan)", reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
+                await q.edit_message_text(f"⛽ **BNB Gas Live**\n\n{price} Gwei\nSource: BscScan", reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
         except:
             await q.edit_message_text("⛽ Gas failed", reply_markup=back_kb())
 
@@ -317,11 +344,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         texts=[]
         for s in ALL_COINS:
             p=await get_price(session, s)
-            if p["price"]: texts.append(f"{s.upper()}: ${fmt(p['price'])} | {p['source']}")
-        await q.edit_message_text("🏭 **INST FLOW**\n\n" + "\n".join(texts), reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
+            if p["price"]: texts.append(f"• {s.upper()}: ${fmt(p['price'])} | {p['source']}")
+        await q.edit_message_text("🏭 **INST FLOW (Live)**\n\n" + "\n".join(texts), reply_markup=back_kb(), parse_mode=ParseMode.MARKDOWN)
 
     elif data == "scanner_on":
-        await q.edit_message_text(f"📡 Scanner active {SCAN_INTERVAL}s Alerts to {ALERT_CHAT_ID}\nCoins {', '.join([c.upper() for c in ALL_COINS])}\nFallback: SoSo->Binance->CoinGecko", reply_markup=back_kb())
+        await q.edit_message_text(f"📡 Scanner active {SCAN_INTERVAL}s to {ALERT_CHAT_ID}\nCoins {', '.join([c.upper() for c in ALL_COINS])}\nFallback: SoSo->Binance->CoinGecko\nSoSo calls: {analytics['soso_calls']}", reply_markup=back_kb())
 
     else:
         await q.edit_message_text(f"{data}", reply_markup=back_kb())
