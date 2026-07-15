@@ -57,7 +57,6 @@ async def soso_get(session, endpoint, params=None):
 # FALLBACK: SoSo -> CoinGecko -> Binance -> OKX
 async def get_price(session, symbol):
     sym = symbol.upper()
-    # 1. SoSoValue
     try:
         if SOSO_API_KEY:
             d = await soso_get(session, "token/price", {"symbol": sym})
@@ -66,7 +65,6 @@ async def get_price(session, symbol):
                 if price:
                     return {"price": float(price), "change": float(d.get("change_24h",0) or 0), "source": "SoSoValue"}
     except: pass
-    # 2. CoinGecko
     coin = COIN_NAMES.get(sym.lower())
     if coin:
         try:
@@ -77,7 +75,6 @@ async def get_price(session, symbol):
                     if d.get("usd"):
                         return {"price": float(d["usd"]), "change": float(d.get("usd_24h_change",0) or 0), "source": "CoinGecko"}
         except: pass
-    # 3. Binance
     for url in [f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT", f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT"]:
         try:
             async with session.get(url, timeout=TIMEOUT) as r:
@@ -86,7 +83,6 @@ async def get_price(session, symbol):
                     if j.get("lastPrice"):
                         return {"price": float(j["lastPrice"]), "change": float(j.get("priceChangePercent",0) or 0), "source": "Binance"}
         except: continue
-    # 4. OKX
     try:
         async with session.get(f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT", timeout=TIMEOUT) as r:
             if r.status == 200:
@@ -253,15 +249,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await q.edit_message_text(f"✅ {data} - Module restored", reply_markup=back_kb())
 
-async def health(request): return web.Response(text=f"OK SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}")
+async def health(request):
+    return web.Response(text=f"OK SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}")
+
 async def start_webserver():
-    app = web.Application(); app.router.add_get("/", health); app.router.add_get("/health", health)
-    runner = web.AppRunner(app); await runner.setup()
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", 10000))).start()
 
 async def main():
     logging.info("===== BOT STARTING =====")
-
     await start_webserver()
 
     shared_session = aiohttp.ClientSession(timeout=TIMEOUT)
@@ -273,9 +273,17 @@ async def main():
         logging.info(f"===== SYMBOLS COUNT: {len(SYMBOL_IDS)} =====")
 
         try:
-            async with shared_session.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=TIMEOUT) as r:
-                await r.text()
-        except: pass
+            async with shared_session.get(
+                f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true",
+                timeout=TIMEOUT
+            ) as r:
+                txt = await r.text()
+                logging.info(f"Delete webhook: {txt[:200]}")
+        except Exception as e:
+            logging.warning(f"deleteWebhook failed: {e}")
+
+        await asyncio.sleep(2)
+
     except Exception as e:
         logging.exception(f"Startup failed: {e}")
 
@@ -284,16 +292,34 @@ async def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(button_handler))
+
     await app.initialize()
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+
+    try:
+        await app.bot.delete_webhook(drop_pending_updates=True)
+    except:
+        pass
 
     logging.info("===== BOT POLLING STARTED =====")
 
     try:
+        await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
         while True:
             await asyncio.sleep(3600)
+    except Exception as e:
+        if "Conflict" in str(e):
+            logging.warning("Conflict detected - another instance running, retrying in 10s")
+            await asyncio.sleep(10)
+        else:
+            logging.exception("Polling crashed")
     finally:
+        try:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+        except:
+            pass
         await shared_session.close()
 
 if __name__ == "__main__":
