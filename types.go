@@ -1,10 +1,10 @@
 package main
 
 type SignOrderRequest struct {
-	PrivateKey string `json:"privateKey"`
-
 	AccountID uint64 `json:"accountID"`
 	SymbolID  uint64 `json:"symbolID"`
+
+	Nonce uint64 `json:"nonce"`
 
 	Side         string `json:"side"`
 	PositionSide string `json:"positionSide"`
@@ -16,7 +16,7 @@ type SignOrderRequest struct {
 }
 
 type SignOrderResponse struct {
-	Success bool   `json:"success"`
+	Success bool `json:"success"`
 
 	Signature string `json:"signature,omitempty"`
 	Address   string `json:"address,omitempty"`
