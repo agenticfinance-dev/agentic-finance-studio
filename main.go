@@ -34,6 +34,7 @@ func main() {
 
 	http.HandleFunc("/", app.HealthHandler)
 	http.HandleFunc("/symbols", app.SymbolsHandler)
+	http.HandleFunc("/sign-order", app.SignOrderHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
