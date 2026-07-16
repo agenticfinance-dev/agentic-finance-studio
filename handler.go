@@ -30,3 +30,36 @@ func (a *App) SymbolsHandler(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(symbols)
 }
+
+// NEW HANDLER
+func (a *App) SignOrderHandler(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req SignOrderRequest
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(SignOrderResponse{
+			Success: false,
+			Error: err.Error(),
+		})
+		return
+	}
+
+	signer, err := NewOrderSigner(req.PrivateKey)
+	if err != nil {
+		json.NewEncoder(w).Encode(SignOrderResponse{
+			Success: false,
+			Error: err.Error(),
+		})
+		return
+	}
+
+	json.NewEncoder(w).Encode(SignOrderResponse{
+		Success: true,
+		Address: signer.Address(),
+	})
+}
