@@ -14,7 +14,7 @@ type SoDEXClient struct {
 
 func NewSoDEXClient(privateKey *ecdsa.PrivateKey) *SoDEXClient {
 	cfg := client.Config{
-		BaseURL:    client.MainnetBaseURL,
+		BaseURL:    "https://api.sodex.xyz",
 		ChainID:    286623,
 		PrivateKey: privateKey,
 	}
