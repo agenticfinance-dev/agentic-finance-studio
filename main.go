@@ -1,30 +1,39 @@
 package main
 
 import (
-	"encoding/json"
+	"crypto/ecdsa"
 	"log"
 	"net/http"
 	"os"
+
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
-type HealthResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
-
-func health(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-
-	resp := HealthResponse{
-		Status:  "ok",
-		Message: "SoDEX Go Signer is running",
+func loadPrivateKey() *ecdsa.PrivateKey {
+	key := os.Getenv("SODEX_PRIVATE_KEY")
+	if key == "" {
+		log.Fatal("SODEX_PRIVATE_KEY environment variable not set")
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	pk, err := crypto.HexToECDSA(key)
+	if err != nil {
+		log.Fatalf("Invalid private key: %v", err)
+	}
+
+	return pk
 }
 
 func main() {
-	http.HandleFunc("/", health)
+	privateKey := loadPrivateKey()
+
+	sodex := NewSoDEXClient(privateKey)
+
+	app := &App{
+		SoDEX: sodex,
+	}
+
+	http.HandleFunc("/", app.HealthHandler)
+	http.HandleFunc("/symbols", app.SymbolsHandler)
 
 	port := os.Getenv("PORT")
 	if port == "" {
