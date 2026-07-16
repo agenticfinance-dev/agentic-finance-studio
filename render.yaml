@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: sodex-go-signer
+    runtime: go
+    plan: free
+    buildCommand: go build -o server .
+    startCommand: ./server
+    autoDeploy: true
