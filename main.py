@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, CallbackQueryHandler
 from sodex import SoDEXExecutor, load_symbols, SYMBOL_IDS
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_TOKEN"))
 SOSO_API_KEY = os.getenv("SOSO_API_KEY")
 SOSO_BASE = "https://openapi.sosovalue.com/openapi/v1"
 SOSO_HEADERS = {"x-soso-api-key": SOSO_API_KEY or "", "Accept": "application/json"}
@@ -17,6 +17,9 @@ ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 TIMEOUT = aiohttp.ClientTimeout(total=20)
+SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
+ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "1000"))
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.5"))
 analytics = {"soso_calls": 0, "live_trades": 0, "signals": 2551, "alerts": 151}
 start_time = datetime.now()
 
@@ -51,7 +54,9 @@ async def soso_get(session, endpoint, params=None):
             res = await r.json()
             if res.get("code")!= 0: return None
             return res.get("data")
-    except: return None
+    except Exception as e:
+        logging.warning(f"soso_get failed: {e}")
+        return None
 
 # FALLBACK: SoSo -> CoinGecko -> Binance -> OKX
 async def get_price(session, symbol):
@@ -63,7 +68,8 @@ async def get_price(session, symbol):
                 price = d.get("price") or d.get("last_price")
                 if price:
                     return {"price": float(price), "change": float(d.get("change_24h",0) or 0), "source": "SoSoValue"}
-    except: pass
+    except Exception:
+        pass
     coin = COIN_NAMES.get(sym.lower())
     if coin:
         try:
@@ -73,7 +79,8 @@ async def get_price(session, symbol):
                     d = j.get(coin, {})
                     if d.get("usd"):
                         return {"price": float(d["usd"]), "change": float(d.get("usd_24h_change",0) or 0), "source": "CoinGecko"}
-        except: pass
+        except Exception:
+            pass
     for url in [f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT", f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT"]:
         try:
             async with session.get(url, timeout=TIMEOUT) as r:
@@ -81,7 +88,8 @@ async def get_price(session, symbol):
                     j = await r.json()
                     if j.get("lastPrice"):
                         return {"price": float(j["lastPrice"]), "change": float(j.get("priceChangePercent",0) or 0), "source": "Binance"}
-        except: continue
+        except Exception:
+            continue
     try:
         async with session.get(f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT", timeout=TIMEOUT) as r:
             if r.status == 200:
@@ -89,7 +97,8 @@ async def get_price(session, symbol):
                 last = j.get("data", [{}])[0].get("last")
                 if last:
                     return {"price": float(last), "change": 0, "source": "OKX"}
-    except: pass
+    except Exception:
+        pass
     return {"price": None, "change": 0, "source": "None"}
 
 async def get_indicators(session, symbol):
@@ -110,7 +119,8 @@ async def get_indicators(session, symbol):
                     atr = sum(tr[-14:])/14
                     vol = sum([float(x[5]) for x in k[-5:]]); avg_vol = sum([float(x[5]) for x in k[-20:]])/20
                     return {"rsi": round(rsi,1), "ema20": ema20, "ema50": ema50, "atr": atr, "vol_spike": vol > avg_vol*1.5}
-        except: continue
+        except Exception:
+            continue
     return {"rsi": 55, "ema20": 0, "ema50": 0, "atr": 0, "vol_spike": False}
 
 sodex = SoDEXExecutor(SODEX_API_KEY_NAME, SODEX_API_PRIVATE_KEY, SODEX_ACCOUNT_ID)
@@ -151,7 +161,7 @@ async def intelligence_engine(session, symbol):
     elif score<=40: bias="SHORT"; entry=price*1.008; sl=entry+atr*1.2; tp=entry-atr*2.8
     else: bias="NEUTRAL"; entry=price; sl=entry-atr*0.8; tp=entry+atr*1.2
     rr = round(abs(tp-entry)/abs(entry-sl),2) if entry!=sl else 2.0
-    qty = min((1000*0.015)/abs(entry-sl) if entry!=sl else 0.01, (1000*0.5)/entry)
+    qty = min((ACCOUNT_SIZE*(RISK_PERCENT/100))/abs(entry-sl) if entry!=sl else 0.01, (ACCOUNT_SIZE*0.5)/entry)
     return {"symbol":symbol.upper(),"price":price,"change":price_data["change"],"entry":entry,"sl":sl,"tp":tp,"rr":rr,"confidence":min(96,max(55,score)),"bias":bias,"reasons":reasons,"checks":checks,"rsi":ind["rsi"],"atr":atr,"qty":qty,"source":price_data["source"]}
 
 def fmt(p): return f"{p:.6f}" if p<1 else f"{p:.2f}" if p<100 else f"{p:,.0f}"
@@ -189,7 +199,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             safe_res = json.dumps(res, indent=2)[:1000]
             text = f"✅ SODEX EXECUTE {sig['symbol']}\nBias: {sig['bias']}\nEntry: ${fmt(sig['entry'])}\nQty: {sig['qty']:.4f}\n\nResult:\n{safe_res}"
             await q.edit_message_text(text, reply_markup=back_kb())
-            analytics["live_trades"]+=1
+            if isinstance(res, dict) and res.get("ok"):
+                analytics["live_trades"] += 1
         except Exception as e:
             await q.edit_message_text(f"❌ SODEX Error: {str(e)[:500]}", reply_markup=back_kb())
     elif data == "sectors":
@@ -201,7 +212,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             async with session.get("https://api.bscscan.com/api?module=gastracker&action=gasoracle", timeout=TIMEOUT) as r:
                 j = await r.json(); price = j.get("result", {}).get("FastGasPrice", "3.0")
                 await q.edit_message_text(f"⛽ BNB Chain Gas Price\n\nCurrent: {price} Gwei", reply_markup=back_kb())
-        except: await q.edit_message_text("⛽ BNB Chain Gas Price\nCurrent: 3.0 Gwei", reply_markup=back_kb())
+        except Exception:
+            await q.edit_message_text("⛽ BNB Chain Gas Price\nCurrent: 3.0 Gwei", reply_markup=back_kb())
     elif data == "sector_map":
         await q.edit_message_text("🗺 Sector Map\n\nAI -> +5.2%\nDeFi -> +2.1%\nL1s -> +1.8%\nGaming -> -0.5%", reply_markup=back_kb())
     elif data == "whale_radar":
@@ -230,7 +242,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"✅ {data} - Module restored", reply_markup=back_kb())
 
 async def health(request):
-    return web.Response(text=f"OK SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}")
+    return web.json_response({
+        "status": "ok",
+        "sodex": sodex.ready,
+        "symbols": len(SYMBOL_IDS),
+        "signals": analytics["signals"],
+        "live_trades": analytics["live_trades"]
+    })
 
 async def start_webserver():
     app = web.Application()
@@ -242,6 +260,9 @@ async def start_webserver():
 
 async def main():
     logging.info("===== BOT STARTING =====")
+    if not TOKEN:
+        raise Exception("TELEGRAM_BOT_TOKEN missing")
+
     await start_webserver()
     shared_session = aiohttp.ClientSession(timeout=TIMEOUT)
     try:
@@ -258,33 +279,40 @@ async def main():
         await asyncio.sleep(2)
     except Exception as e:
         logging.exception(f"Startup failed: {e}")
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.bot_data["session"] = shared_session
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    await app.initialize()
-    await app.start()
+
     try:
-        await app.bot.delete_webhook(drop_pending_updates=True)
-    except: pass
-    logging.info("===== BOT POLLING STARTED =====")
-    try:
-        await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-        while True:
-            await asyncio.sleep(3600)
-    except Exception as e:
-        if "Conflict" in str(e):
-            logging.warning("Conflict detected - another instance running, retrying in 10s")
-            await asyncio.sleep(10)
-        else:
-            logging.exception("Polling crashed")
-    finally:
+        app = ApplicationBuilder().token(TOKEN).build()
+        app.bot_data["session"] = shared_session
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("status", start))
+        app.add_handler(CallbackQueryHandler(button_handler))
+        await app.initialize()
+        await app.start()
         try:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
-        except: pass
-        await shared_session.close()
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as e:
+            logging.warning(f"delete_webhook failed: {e}")
+        logging.info("===== BOT POLLING STARTED =====")
+        try:
+            await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+            while True:
+                await asyncio.sleep(3600)
+        except Exception as e:
+            if "Conflict" in str(e):
+                logging.warning("Conflict detected - another instance running, retrying in 10s")
+                await asyncio.sleep(10)
+            else:
+                logging.exception("Polling crashed")
+        finally:
+            try:
+                await app.updater.stop()
+                await app.stop()
+                await app.shutdown()
+            except Exception:
+                pass
+    finally:
+        if shared_session and not shared_session.closed:
+            await shared_session.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
