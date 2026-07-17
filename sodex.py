@@ -54,7 +54,12 @@ class SoDEXExecutor:
         self.api_key_name = (api_key_name or "").strip()
         self.private_key_raw = (private_key or "").strip()
         self.account_id = (account_id or "0").strip()
-        self.ready = bool(self.api_key_name and self.private_key_raw and self.account_id and self.account_id!= "0")
+        self.ready = bool(
+            self.private_key_raw
+            and self.api_key_name
+            and self.account_id
+            and self.account_id!= "0"
+        )
 
     async def sign(self, session, payload):
         timeout = aiohttp.ClientTimeout(total=60)
@@ -91,7 +96,6 @@ class SoDEXExecutor:
             "timeInForce": 1,
             "price": price_str,
             "quantity": qty_str,
-            "reduceOnly": False,
             "positionSide": 1 if bias == "LONG" else 2
         }
 
@@ -112,13 +116,10 @@ class SoDEXExecutor:
                 "quantity": qty_str,
                 "clOrdID": f"AF-{nonce}",
             }
-            logging.info("=== SODEX ORDER START ===")
-            logging.info(f"Symbol: {symbol} -> {found_name} (ID={symbol_id}) | Bias={bias} | Price={price_str} | Qty={qty_str}")
-            logging.info(f"Payload: {payload}")
-            logging.info(f"Sign Payload: {sign_payload}")
-            logging.info("-> Calling remote signer: https://agenticfinance-signer.onrender.com/sign-order")
+            logging.info("========== SIGN DEBUG ==========")
+            logging.info(json.dumps(sign_payload, indent=2))
+            logging.info("================================")
             sig = await self.sign(session, sign_payload)
-            logging.info(f"✅ Signer responded - signature: {sig[:60]}...")
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -129,20 +130,17 @@ class SoDEXExecutor:
             if self.api_key_name:
                 headers["X-API-Key"] = self.api_key_name
 
-            logging.info(f"-> Sending order to SoDEX: {SODEX_PERPS_URL}/trade/orders")
             async with session.post(f"{SODEX_PERPS_URL}/trade/orders", json=payload, headers=headers) as r:
                 txt = await r.text()
-                logging.info(f"<- SoDEX Response: {found_name} ID={symbol_id} Status={r.status} Body={txt[:1000]}")
+                logging.info(f"[SoDEX] {found_name} ID={symbol_id} {r.status} {txt[:800]}")
                 if r.status in [200, 201]:
-                    logging.info("=== SODEX ORDER ACCEPTED ===")
                     try:
                         data = json.loads(txt) if txt else {}
                         if isinstance(data, dict) and data.get("error"):
                             return {"err": f"{data.get('error')}", "used_symbol": found_name, "raw": data}
                         return {"ok": data, "used_symbol": found_name}
-                    except Exception:
+                    except:
                         return {"ok": {"raw": txt}, "used_symbol": found_name}
-                logging.info("=== SODEX ORDER REJECTED ===")
                 return {"err": f"{r.status} {txt[:800]}", "used_symbol": found_name}
         except Exception as e:
             logging.exception("[SoDEX] place_order failed")
