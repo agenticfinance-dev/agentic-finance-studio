@@ -12,9 +12,8 @@ import (
 )
 
 type OrderSigner struct {
-	privateKey interface{}
-	signer     *perpsSigner.Signer
-	address    string
+	signer  *perpsSigner.Signer
+	address string
 }
 
 func NewOrderSigner(privateKeyHex string) (*OrderSigner, error) {
@@ -29,9 +28,8 @@ func NewOrderSigner(privateKeyHex string) (*OrderSigner, error) {
 	address := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
 
 	return &OrderSigner{
-		privateKey: privateKey,
-		signer:     s,
-		address:    address,
+		signer:  s,
+		address: address,
 	}, nil
 }
 
@@ -51,6 +49,30 @@ func (o *OrderSigner) Sign(req SignOrderRequest) (string, error) {
 		return "", err
 	}
 
+	// Convert order side
+	var side enums.OrderSide
+	switch req.Side {
+	case "BUY":
+		side = enums.OrderSideBuy
+	case "SELL":
+		side = enums.OrderSideSell
+	default:
+		side = enums.OrderSideUnknown
+	}
+
+	// Convert position side
+	var positionSide enums.PositionSide
+	switch req.PositionSide {
+	case "LONG":
+		positionSide = enums.PositionSideLong
+	case "SHORT":
+		positionSide = enums.PositionSideShort
+	case "BOTH":
+		positionSide = enums.PositionSideBoth
+	default:
+		positionSide = enums.PositionSideUnknown
+	}
+
 	order := &perpsTypes.NewOrderRequest{
 		AccountID: req.AccountID,
 		SymbolID:  req.SymbolID,
@@ -58,12 +80,12 @@ func (o *OrderSigner) Sign(req SignOrderRequest) (string, error) {
 			{
 				ClOrdID:      req.ClOrdID,
 				Modifier:     enums.OrderModifierNormal,
-				Side:         enums.OrderSide(req.Side),
+				Side:         side,
 				Type:         enums.OrderTypeLimit,
 				TimeInForce:  enums.TimeInForceGTC,
 				Price:        &price,
 				Quantity:     &qty,
-				PositionSide: enums.PositionSide(req.PositionSide),
+				PositionSide: positionSide,
 			},
 		},
 	}
