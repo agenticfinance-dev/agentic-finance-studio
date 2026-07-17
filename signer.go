@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ecdsa"
 	"encoding/hex"
 
 	"github.com/ethereum/go-ethereum/crypto"
@@ -16,12 +17,7 @@ type OrderSigner struct {
 	address string
 }
 
-func NewOrderSigner(privateKeyHex string) (*OrderSigner, error) {
-
-	privateKey, err := crypto.HexToECDSA(privateKeyHex)
-	if err != nil {
-		return nil, err
-	}
+func NewOrderSigner(privateKey *ecdsa.PrivateKey) (*OrderSigner, error) {
 
 	s := perpsSigner.NewSigner(286623, privateKey)
 
