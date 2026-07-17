@@ -1,5 +1,7 @@
 import os, asyncio, logging, json
 from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 from aiohttp import web
 import aiohttp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,8 +22,12 @@ TIMEOUT = aiohttp.ClientTimeout(total=20)
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "1000"))
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.5"))
-analytics = {"soso_calls": 0, "live_trades": 0, "signals": 2551, "alerts": 151}
+MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "65"))
+ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
+
+analytics = {"soso_calls": 0, "live_trades": 0, "signals": 2551, "alerts": 151, "auto_scans": 0}
 start_time = datetime.now()
+last_alert_time = {}
 
 COIN_NAMES = {"btc":"bitcoin","eth":"ethereum","bnb":"binancecoin","xrp":"ripple","sol":"solana"}
 ALL_COINS = ["btc","eth","bnb","xrp","sol"]
@@ -58,7 +64,6 @@ async def soso_get(session, endpoint, params=None):
         logging.warning(f"soso_get failed: {e}")
         return None
 
-# FALLBACK: SoSo -> CoinGecko -> Binance -> OKX
 async def get_price(session, symbol):
     sym = symbol.upper()
     try:
@@ -124,6 +129,7 @@ async def get_indicators(session, symbol):
     return {"rsi": 55, "ema20": 0, "ema50": 0, "atr": 0, "vol_spike": False}
 
 sodex = SoDEXExecutor(SODEX_API_KEY_NAME, SODEX_API_PRIVATE_KEY, SODEX_ACCOUNT_ID)
+logging.info(f"SoDEX Config: key={bool(SODEX_API_KEY_NAME)}, private={bool(SODEX_API_PRIVATE_KEY)}, account={SODEX_ACCOUNT_ID}, ready={sodex.ready}")
 
 async def intelligence_engine(session, symbol):
     price_data = await get_price(session, symbol)
@@ -157,7 +163,7 @@ async def intelligence_engine(session, symbol):
     reasons.append(f"• {vol_reason}")
     reasons.append(f"• {'Bullish' if score>55 else 'Bearish' if score<45 else 'Neutral'} confirmation candle")
     price = price_data["price"]; atr = ind["atr"] or price*0.015
-    if score>=70: bias="LONG"; entry=price*0.992; sl=entry-atr*1.2; tp=entry+atr*2.8
+    if score>=65: bias="LONG"; entry=price*0.992; sl=entry-atr*1.2; tp=entry+atr*2.8
     elif score<=40: bias="SHORT"; entry=price*1.008; sl=entry+atr*1.2; tp=entry-atr*2.8
     else: bias="NEUTRAL"; entry=price; sl=entry-atr*0.8; tp=entry+atr*1.2
     rr = round(abs(tp-entry)/abs(entry-sl),2) if entry!=sl else 2.0
@@ -166,16 +172,88 @@ async def intelligence_engine(session, symbol):
 
 def fmt(p): return f"{p:.6f}" if p<1 else f"{p:.2f}" if p<100 else f"{p:,.0f}"
 
+async def autonomous_scanner(app):
+    logging.info(f"🤖 Autonomous scanner started - interval {SCAN_INTERVAL}s, min confidence {MIN_CONFIDENCE}%")
+    await asyncio.sleep(10)
+    session = app.bot_data.get("session")
+    while True:
+        try:
+            if not ENABLE_AUTO_ALERTS:
+                await asyncio.sleep(SCAN_INTERVAL)
+                continue
+            analytics["auto_scans"] += 1
+            logging.info(f"🔍 [AutoScan #{analytics['auto_scans']}] Scanning {len(ALL_COINS)} coins...")
+            for coin in ALL_COINS:
+                try:
+                    sig = await intelligence_engine(session, coin)
+                    if not sig:
+                        continue
+                    if sig["confidence"] >= MIN_CONFIDENCE and sig["bias"] != "NEUTRAL":
+                        now = datetime.now().timestamp()
+                        last = last_alert_time.get(coin, 0)
+                        if now - last < 3600:
+                            continue
+                        last_alert_time[coin] = now
+                        analytics["alerts"] += 1
+                        alert_text = (
+                            f"🤖 AGENTIC ALERT - {sig['symbol']} {sig['bias']} {sig['confidence']}%\n\n"
+                            f"💰 ${fmt(sig['price'])} ({sig['change']:+.1f}%)\n"
+                            f"Entry: ${fmt(sig['entry'])} | TP: ${fmt(sig['tp'])} | SL: ${fmt(sig['sl'])}\n"
+                            f"RR: {sig['rr']} | RSI: {sig['rsi']} | Qty: {sig['qty']:.4f}\n\n"
+                            + "\n".join(sig['checks']) + "\n\n"
+                            f"⚡ Auto-detected by Agentic Finance"
+                        )
+                        kb = InlineKeyboardMarkup([
+                            [InlineKeyboardButton(f"⚡ EXECUTE {sig['symbol']}", callback_data=f"exec_{coin}")],
+                            [InlineKeyboardButton("📊 View Details", callback_data=f"signal_{coin}")]
+                        ])
+                        if ALERT_CHAT_ID:
+                            try:
+                                await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=alert_text, reply_markup=kb)
+                                logging.info(f"✅ Auto-alert sent for {coin} {sig['bias']} {sig['confidence']}%")
+                            except Exception as e:
+                                logging.warning(f"Failed to send auto-alert: {e}")
+                        else:
+                            logging.info(f"🔔 [AUTO-ALERT] {coin} {sig['bias']} {sig['confidence']}% - ALERT_CHAT_ID not set")
+                    await asyncio.sleep(2)
+                except Exception as e:
+                    logging.warning(f"Scanner error for {coin}: {e}")
+                    continue
+            logging.info(f"✅ AutoScan #{analytics['auto_scans']} complete - next in {SCAN_INTERVAL}s")
+        except Exception as e:
+            logging.exception(f"Autonomous scanner crashed: {e}")
+        await asyncio.sleep(SCAN_INTERVAL)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uptime = datetime.now() - start_time; hours = uptime.total_seconds()/3600
-    await update.message.reply_text(f"🚀 Agentic Finance Live\n📊 Live Stats\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {int(hours//24)}d {int(hours%24)}h\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}", reply_markup=main_menu_kb())
+    mode = "🤖 AGENTIC MODE" if ENABLE_AUTO_ALERTS else "📱 MANUAL MODE"
+    await update.message.reply_text(
+        f"🚀 Agentic Finance Live - {mode}\n"
+        f"📊 Live Stats\n"
+        f"Signals: {analytics['signals']} | AutoScans: {analytics['auto_scans']}\n"
+        f"Alerts: {analytics['alerts']} | Trades: {analytics['live_trades']}\n"
+        f"Uptime: {int(hours//24)}d {int(hours%24)}h\n"
+        f"SoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}\n"
+        f"Scanner: every {SCAN_INTERVAL}s | MinConf: {MIN_CONFIDENCE}%\n"
+        f"Account: ${ACCOUNT_SIZE} | Risk: {RISK_PERCENT}%",
+        reply_markup=main_menu_kb()
+    )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     session = get_session(context.application); data = q.data
     if data == "back_main":
         uptime = datetime.now() - start_time; hours = uptime.total_seconds()/3600
-        await q.edit_message_text(f"🚀 Agentic Finance Live\n📊 Live Stats\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {int(hours//24)}d {int(hours%24)}h\nSoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}", reply_markup=main_menu_kb()); return
+        mode = "🤖 AGENTIC" if ENABLE_AUTO_ALERTS else "📱 MANUAL"
+        await q.edit_message_text(
+            f"🚀 Agentic Finance Live - {mode}\n📊 Live Stats\n"
+            f"Signals: {analytics['signals']} | AutoScans: {analytics['auto_scans']}\n"
+            f"Alerts: {analytics['alerts']} | Trades: {analytics['live_trades']}\n"
+            f"Uptime: {int(hours//24)}d {int(hours%24)}h\n"
+            f"SoSo:{analytics['soso_calls']} SoDEX:{sodex.ready} Sym:{len(SYMBOL_IDS)}",
+            reply_markup=main_menu_kb()
+        )
+        return
     if data.startswith("signal_"):
         sym = data.split("_")[1]
         sig = await intelligence_engine(session, sym)
@@ -191,8 +269,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sig = await intelligence_engine(session, sym)
         if not sig:
             await q.edit_message_text("❌ Failed to get signal", reply_markup=back_kb()); return
-        if sig["bias"] == "NEUTRAL":
-            await q.edit_message_text(f"⚠️ No trade executed. Signal is NEUTRAL.\n\n{sig['symbol']} | {sig['confidence']}%\n" + "\n".join(sig['checks']), reply_markup=back_kb()); return
+        if sig["confidence"] < 65:
+            await q.edit_message_text(f"⚠️ Confidence too low. Trade blocked.\n\n{sig['symbol']} | {sig['confidence']}%\n" + "\n".join(sig['checks']), reply_markup=back_kb()); return
         await q.edit_message_text(f"⏳ Executing {sig['symbol']} {sig['bias']} on SoDEX...", reply_markup=back_kb())
         try:
             res = await sodex.place_order(session, sym, sig["bias"], sig["entry"], sig["qty"])
@@ -223,11 +301,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "intelligence":
         await q.edit_message_text("🧠 Intelligence\n\nMarket sentiment: NEUTRAL\nFear & Greed: 26", reply_markup=back_kb())
     elif data == "performance":
-        await q.edit_message_text(f"📊 Performance\n\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nLive Trades: {analytics['live_trades']}\nUptime: {datetime.now()-start_time}", reply_markup=back_kb())
+        await q.edit_message_text(f"📊 Performance\n\nSignals: {analytics['signals']}\nAutoScans: {analytics['auto_scans']}\nAlerts: {analytics['alerts']}\nLive Trades: {analytics['live_trades']}\nUptime: {datetime.now()-start_time}", reply_markup=back_kb())
     elif data == "stats":
-        await q.edit_message_text(f"📊 Live Stats\n\nSignals: {analytics['signals']}\nAlerts: {analytics['alerts']}\nUptime: {datetime.now()-start_time}", reply_markup=back_kb())
+        await q.edit_message_text(f"📊 Live Stats\n\nSignals: {analytics['signals']}\nAutoScans: {analytics['auto_scans']}\nAlerts: {analytics['alerts']}\nUptime: {datetime.now()-start_time}", reply_markup=back_kb())
     elif data == "scanner_on":
-        await q.edit_message_text(f"📡 Scanner active every {SCAN_INTERVAL}s for 75%+ signals\nCoins: {', '.join([c.upper() for c in ALL_COINS])}", reply_markup=back_kb())
+        mode = "🤖 ACTIVE" if ENABLE_AUTO_ALERTS else "⏸️ DISABLED"
+        await q.edit_message_text(f"📡 Scanner Status: {mode}\n\nActive every {SCAN_INTERVAL}s for {MIN_CONFIDENCE}%+ signals\nCoins: {', '.join([c.upper() for c in ALL_COINS])}\nAutoScans done: {analytics['auto_scans']}\nLast alerts: {analytics['alerts']}", reply_markup=back_kb())
     elif data == "portfolio":
         await q.edit_message_text("💼 Portfolio\n\nNo open positions (connect SoDEX to view)", reply_markup=back_kb())
     elif data == "inst_flow":
@@ -247,7 +326,11 @@ async def health(request):
         "sodex": sodex.ready,
         "symbols": len(SYMBOL_IDS),
         "signals": analytics["signals"],
-        "live_trades": analytics["live_trades"]
+        "auto_scans": analytics["auto_scans"],
+        "alerts": analytics["alerts"],
+        "live_trades": analytics["live_trades"],
+        "agentic": ENABLE_AUTO_ALERTS,
+        "scan_interval": SCAN_INTERVAL
     })
 
 async def start_webserver():
@@ -262,7 +345,6 @@ async def main():
     logging.info("===== BOT STARTING =====")
     if not TOKEN:
         raise Exception("TELEGRAM_BOT_TOKEN missing")
-
     await start_webserver()
     shared_session = aiohttp.ClientSession(timeout=TIMEOUT)
     try:
@@ -279,7 +361,6 @@ async def main():
         await asyncio.sleep(2)
     except Exception as e:
         logging.exception(f"Startup failed: {e}")
-
     try:
         app = ApplicationBuilder().token(TOKEN).build()
         app.bot_data["session"] = shared_session
@@ -292,6 +373,8 @@ async def main():
             await app.bot.delete_webhook(drop_pending_updates=True)
         except Exception as e:
             logging.warning(f"delete_webhook failed: {e}")
+        scanner_task = asyncio.create_task(autonomous_scanner(app))
+        logging.info("🤖 Autonomous scanner task created")
         logging.info("===== BOT POLLING STARTED =====")
         try:
             await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
@@ -304,6 +387,11 @@ async def main():
             else:
                 logging.exception("Polling crashed")
         finally:
+            scanner_task.cancel()
+            try:
+                await scanner_task
+            except asyncio.CancelledError:
+                pass
             try:
                 await app.updater.stop()
                 await app.stop()
