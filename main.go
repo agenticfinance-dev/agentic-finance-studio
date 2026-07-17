@@ -25,7 +25,10 @@ func main() {
     privateKey := loadPrivateKey()
 
     address := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
-    log.Printf("SIGNER WALLET: %s", address)
+
+    log.Println("#############################################")
+    log.Printf("### SIGNER WALLET: %s", address)
+    log.Println("#############################################")
 
     sodex := NewSoDEXClient(privateKey)
 
