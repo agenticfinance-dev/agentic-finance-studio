@@ -31,7 +31,7 @@ func (a *App) SymbolsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(symbols)
 }
 
-// NEW HANDLER
+// SignOrderHandler signs a new perps order.
 func (a *App) SignOrderHandler(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method != http.MethodPost {
@@ -39,27 +39,42 @@ func (a *App) SignOrderHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+
 	var req SignOrderRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		json.NewEncoder(w).Encode(SignOrderResponse{
 			Success: false,
-			Error: err.Error(),
+			Error:   err.Error(),
 		})
 		return
 	}
 
-	signer, err := NewOrderSigner(req.PrivateKey)
+	// Use the server private key from Render
+	privateKey := loadPrivateKey()
+
+	signer, err := NewOrderSigner(privateKey)
 	if err != nil {
 		json.NewEncoder(w).Encode(SignOrderResponse{
 			Success: false,
-			Error: err.Error(),
+			Error:   err.Error(),
+		})
+		return
+	}
+
+	signature, err := signer.Sign(req)
+	if err != nil {
+		json.NewEncoder(w).Encode(SignOrderResponse{
+			Success: false,
+			Error:   err.Error(),
 		})
 		return
 	}
 
 	json.NewEncoder(w).Encode(SignOrderResponse{
-		Success: true,
-		Address: signer.Address(),
+		Success:   true,
+		Signature: signature,
+		Address:   signer.Address(),
 	})
 }
