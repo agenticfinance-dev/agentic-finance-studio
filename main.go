@@ -1,54 +1,58 @@
 package main
 
 import (
-    "crypto/ecdsa"
-    "log"
-    "net/http"
-    "os"
+	"crypto/ecdsa"
+	"log"
+	"net/http"
+	"os"
 
-    "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/crypto"
 )
 
 func loadPrivateKey() *ecdsa.PrivateKey {
-    key := os.Getenv("SODEX_PRIVATE_KEY")
-    if key == "" {
-        log.Fatal("SODEX_PRIVATE_KEY environment variable not set")
-    }
-    pk, err := crypto.HexToECDSA(key)
-    if err != nil {
-        log.Fatalf("Invalid private key: %v", err)
-    }
-    return pk
+	key := os.Getenv("SODEX_PRIVATE_KEY")
+
+	if key == "" {
+		log.Fatal("SODEX_PRIVATE_KEY missing")
+	}
+
+	pk, err := crypto.HexToECDSA(key)
+	if err != nil {
+		log.Fatalf("Invalid private key: %v", err)
+	}
+
+	return pk
 }
 
 func main() {
-    privateKey := loadPrivateKey()
 
-    address := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
+	privateKey := loadPrivateKey()
 
-    log.Println("#############################################")
-    log.Printf("### SIGNER WALLET: %s", address)
-    log.Println("#############################################")
+	address := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
 
-    sodex := NewSoDEXClient(privateKey)
+	log.Println("#############################################")
+	log.Printf("### SIGNER WALLET: %s", address)
+	log.Println("#############################################")
 
-    app := &App{
-        SoDEX: sodex,
-    }
 
-    http.HandleFunc("/", app.HealthHandler)
-    http.HandleFunc("/symbols", app.SymbolsHandler)
-    http.HandleFunc("/sign-order", app.SignOrderHandler)
+	app := &App{}
 
-    port := os.Getenv("PORT")
-    if port == "" {
-        port = "8080"
-    }
+	http.HandleFunc("/", app.HealthHandler)
+	http.HandleFunc("/sign-order", app.SignOrderHandler)
 
-    log.Printf("Server running on :%s", port)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
 
-    err := http.ListenAndServe("0.0.0.0:"+port, nil)
-    if err != nil {
-        log.Fatalf("SERVER FAILED: %v", err)
-    }
+	server := &http.Server{
+		Addr: "0.0.0.0:" + port,
+	}
+
+	log.Printf("SERVER LISTENING ON %s", server.Addr)
+
+	err := server.ListenAndServe()
+	if err != nil {
+		log.Fatalf("SERVER CRASHED: %v", err)
+	}
 }
