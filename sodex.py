@@ -1,17 +1,9 @@
 import json
 import logging
 import time
+import aiohttp
 from decimal import Decimal
-try:
-    from eth_account import Account
-    from eth_utils import keccak
-    from hexbytes import HexBytes
-    HAS_EIP712 = True
-except ImportError:
-    HAS_EIP712 = False
 
-# If you still get invalid signature, try: "SODEX", "SoDEX", "Bolt", "futures"
-PERPS_DOMAIN_NAME = "SODEX"
 SODEX_CHAIN_ID = 286623
 SODEX_PERPS_URL = "https://mainnet-gw.sodex.dev/api/v1/perps"
 SYMBOL_IDS = {}
@@ -25,20 +17,6 @@ def next_nonce() -> int:
         now = _last_nonce + 1
     _last_nonce = now
     return now
-
-def clean_priv(k: str) -> str:
-    if not k:
-        raise ValueError("Private key empty")
-    k = k.strip().replace("\n","").replace(" ","").replace("\r","")
-    if k.startswith("0x0x"):
-        k = k[2:]
-    if not k.startswith("0x"):
-        k = "0x" + k
-    if len(k) == 42:
-        raise ValueError(f"Pasted ADDRESS {k} not PRIVATE KEY")
-    if len(k)!= 66:
-        raise ValueError(f"Invalid key length {len(k)} expected 66")
-    return k
 
 async def load_symbols(session):
     global SYMBOL_IDS
@@ -63,12 +41,15 @@ async def load_symbols(session):
 
 def find_symbol_id(symbol: str):
     sym = symbol.upper().strip()
+
     for cand in [f"{sym}-USD", f"{sym}-USDT", sym]:
         if cand in SYMBOL_IDS:
-            return SYMBOL_IDS, cand
+            return SYMBOL_IDS[cand], cand
+
     for k, v in SYMBOL_IDS.items():
         if k.upper().startswith(sym + "-"):
             return v, k
+
     return None, None
 
 class SoDEXExecutor:
@@ -76,42 +57,19 @@ class SoDEXExecutor:
         self.api_key_name = (api_key_name or "").strip()
         self.private_key_raw = (private_key or "").strip()
         self.account_id = (account_id or "0").strip()
-        self.ready = HAS_EIP712 and bool(self.private_key_raw and self.api_key_name)
+        self.ready = bool(self.api_key_name and self.account_id)
 
-    def _payload_hash(self, action_payload: dict) -> bytes:
-        j = json.dumps(action_payload, separators=(",", ":"), ensure_ascii=False, sort_keys=False).encode()
-        return keccak(j)
-
-    def sign(self, action_payload: dict, nonce: int):
-        p_hash_bytes = self._payload_hash(action_payload)
-        typed = {
-            "types": {
-                "EIP712Domain": [
-                    {"name": "name", "type": "string"},
-                    {"name": "version", "type": "string"},
-                    {"name": "chainId", "type": "uint256"},
-                    {"name": "verifyingContract", "type": "address"}
-                ],
-                "ExchangeAction": [
-                    {"name": "payloadHash", "type": "bytes32"},
-                    {"name": "nonce", "type": "uint64"}
-                ]
-            },
-            "primaryType": "ExchangeAction",
-            "domain": {
-                "name": PERPS_DOMAIN_NAME,
-                "version": "1",
-                "chainId": SODEX_CHAIN_ID,
-                "verifyingContract": "0x" + "0"*40
-            },
-            "message": {
-                "payloadHash": HexBytes(p_hash_bytes),
-                "nonce": nonce
-            }
-        }
-        key = clean_priv(self.private_key_raw)
-        signed = Account.sign_typed_data(key, full_message=typed)
-        return "0x" + (b"\x01" + signed.signature).hex()
+    async def sign(self, session, payload):
+        async with session.post(
+            "https://agenticfinance-signer.onrender.com/sign-order",
+            json=payload,
+        ) as r:
+            if r.status != 200:
+                raise Exception(await r.text())
+            result = await r.json()
+            if not result.get("success"):
+                raise Exception(result.get("error", "Signing failed"))
+            return result["signature"]
 
     async def place_order(self, session, symbol: str, bias: str, entry: float, qty: float):
         if not self.ready:
@@ -141,10 +99,18 @@ class SoDEXExecutor:
             "orders": [order]
         }
 
-        action_payload = {"type": "newOrder", "params": payload}
-
         try:
-            sig = self.sign(action_payload, nonce)
+            sign_payload = {
+                "accountID": int(float(self.account_id)),
+                "symbolID": symbol_id,
+                "nonce": nonce,
+                "side": "BUY" if bias == "LONG" else "SELL",
+                "positionSide": "LONG" if bias == "LONG" else "SHORT",
+                "price": price_str,
+                "quantity": qty_str,
+                "clOrdID": f"AF-{nonce}",
+            }
+            sig = await self.sign(session, sign_payload)
             headers = {
                 "Content-Type": "application/json",
                 "Accept": "application/json",
@@ -161,7 +127,6 @@ class SoDEXExecutor:
                 if r.status in [200, 201]:
                     try:
                         data = json.loads(txt) if txt else {}
-                        # Check SODEX error inside ok
                         if isinstance(data, dict) and data.get("error"):
                             return {"err": f"{data.get('error')}", "used_symbol": found_name, "raw": data}
                         return {"ok": data, "used_symbol": found_name}
