@@ -24,14 +24,14 @@ SOSO_HEADERS = {"x-soso-api-key": SOSO_API_KEY or "", "Accept": "application/jso
 SODEX_API_KEY_NAME = os.getenv("SODEX_API_KEY_NAME", os.getenv("SODEX_API_KEY",""))
 SODEX_API_PRIVATE_KEY = os.getenv("SODEX_API_PRIVATE_KEY", os.getenv("SODEX_PRIVATE_KEY",""))
 SODEX_ACCOUNT_ID = os.getenv("SODEX_ACCOUNT_ID", "0")
-ALERT_CHAT_ID = os.getenv("ALERT_CHAT_ID")
+ALERT_CHAT_ID = int(os.getenv("ALERT_CHAT_ID", "0"))
 
-TIMEOUT = aiohttp.ClientTimeout(total=20)
+TIMEOUT = aiohttp.ClientTimeout(total=30)
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "1000"))
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.5"))
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "65"))
-ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true")
+ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
 MIN_NOTIONAL = 10.0
 
 analytics = {"soso_calls": 0, "live_trades": 0, "signals": 0, "alerts": 0, "auto_scans": 0}
@@ -44,7 +44,7 @@ COIN_NAMES = {"btc":"bitcoin","eth":"ethereum","bnb":"binancecoin","xrp":"ripple
 ALL_COINS = ["btc","eth","bnb","xrp","sol"]
 
 # ============================================================================
-# SODEX INITIALIZATION WITH FALLBACK (FIX 1)
+# SODEX INITIALIZATION WITH FALLBACK
 # ============================================================================
 
 try:
@@ -496,7 +496,7 @@ async def autonomous_scanner(app):
             
             analytics["auto_scans"] += 1
             
-            # FIX 3: Protect scanner from crashing
+            # FIX: Protect scanner from crashing
             try:
                 signals = await asyncio.gather(
                     *(intelligence_engine(session, coin) for coin in ALL_COINS),
@@ -621,10 +621,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"⚠️ Notional too small: ${notional:.2f} < ${MIN_NOTIONAL} min", reply_markup=back_kb())
             return
         
+        # Check SoDEX readiness before execution
+        if not sodex.ready:
+            await q.edit_message_text(
+                "❌ SoDEX is not connected or symbols failed to load.",
+                reply_markup=back_kb()
+            )
+            return
+        
         await q.edit_message_text(f"⏳ Executing {sig['symbol']} {sig['bias']} on SoDEX...\nEntry: ${fmt(sig['entry'])} (mkt ${fmt(sig['price'])})\nQty: {sig['qty']:.6f} = ${notional:.2f}", reply_markup=back_kb())
         
         try:
-            res = await sodex.place_order(session, sym, sig["bias"], sig["entry"], sig["qty"])
+            res = await sodex.place_order(
+                session=session,
+                symbol=sym.upper(),
+                side=sig["bias"],
+                qty=float(sig["qty"]),
+                price=float(sig["entry"])
+            )
             
             if "err" in res:
                 await q.edit_message_text(f"❌ SoDEX rejected\n\n{res['err'][:1000]}", reply_markup=back_kb())
@@ -632,17 +646,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             analytics["live_trades"] += 1
             
-            # Better order ID extraction
             order_id = (
                 res.get("orderId")
-                or res.get("order_id")
                 or res.get("id")
+                or res.get("txHash")
                 or res.get("hash")
-                or (
-                    res.get("data", {}).get("orderId")
-                    if isinstance(res.get("data"), dict)
-                    else None
-                )
                 or "N/A"
             )
             
@@ -681,7 +689,10 @@ Confidence:
             # Protect verify_order call
             if hasattr(sodex, "verify_order"):
                 try:
-                    verify = await sodex.verify_order(session, order_id)
+                    verify = await sodex.verify_order(
+                        session=session,
+                        order_id=order_id
+                    )
                     if verify:
                         text += f"\n\nVerification:\n{verify.get('status', 'Pending')}"
                 except Exception:
@@ -827,10 +838,10 @@ Confidence:
     elif data == "scanner_on":
         await q.edit_message_text(f"📡 Scanner active every {SCAN_INTERVAL}s for {MIN_CONFIDENCE}%+ signals\nCoins: {', '.join([c.upper() for c in ALL_COINS])}\nAutoAlerts: {ENABLE_AUTO_ALERTS}\nSoDEX:{sodex.ready}", reply_markup=back_kb())
     
-    # ===== PORTFOLIO (FIX 2) =====
+    # ===== PORTFOLIO =====
     elif data == "portfolio":
         try:
-            positions = await sodex.get_positions(session)
+            positions = await sodex.get_positions(session=session)
         except Exception:
             positions = []
         
@@ -861,7 +872,7 @@ Confidence:
         await q.edit_message_text(f"✅ {data} - Module restored", reply_markup=back_kb())
 
 # ============================================================================
-# HEALTH (FIX 4)
+# HEALTH
 # ============================================================================
 
 async def health(request):
@@ -896,8 +907,18 @@ async def main():
     
     try:
         logging.info("===== LOADING SODEX SYMBOLS =====")
-        await load_symbols(shared_session)
-        logging.info(f"===== SYMBOLS COUNT: {len(SYMBOL_IDS)} =====")
+        try:
+            await load_symbols(shared_session)
+            
+            if not SYMBOL_IDS:
+                logging.warning("No SoDEX symbols loaded. Trading disabled.")
+                sodex.ready = False
+            else:
+                logging.info(f"SoDEX symbols loaded: {len(SYMBOL_IDS)}")
+        
+        except Exception as e:
+            logging.exception("Failed loading SoDEX symbols")
+            sodex.ready = False
         
         try:
             async with shared_session.get(f"https://api.telegram.org/bot{TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=TIMEOUT) as r:
@@ -905,7 +926,7 @@ async def main():
                 logging.info(f"Delete webhook: {txt[:200]}")
         except Exception as e:
             logging.warning(f"deleteWebhook failed: {e}")
-        await asyncio.sleep(2)
+        await asyncio.sleep(3)
     except Exception as e:
         logging.exception(f"Startup failed: {e}")
     
@@ -916,21 +937,21 @@ async def main():
     
     await app.initialize()
     
-    # Delete webhook before starting polling
     try:
         await app.bot.delete_webhook(drop_pending_updates=True)
-        logging.info("✅ Webhook deleted")
-    except Exception as e:
-        logging.warning(f"delete_webhook failed: {e}")
+    except Exception:
+        pass
     
     await app.start()
     
-    logging.info("===== BOT POLLING STARTED =====")
     scanner_task = asyncio.create_task(autonomous_scanner(app))
     app.bot_data["scanner_task"] = scanner_task
     
+    await app.updater.start_polling(drop_pending_updates=True)
+    
+    logging.info("Bot started successfully.")
+    
     try:
-        await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
         while True:
             await asyncio.sleep(3600)
     except Exception as e:
