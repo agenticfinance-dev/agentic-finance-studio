@@ -29,7 +29,8 @@ SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "1000"))
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.5"))
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "65"))
-ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true")
+# FIX 1: Removed extra closing parenthesis
+ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
 
 analytics = {"soso_calls": 0, "live_trades": 0, "signals": 2551, "alerts": 151, "auto_scans": 0}
 start_time = datetime.now()
@@ -39,15 +40,15 @@ telegram_connected = True
 last_scan_time = None
 avg_scan_duration = 0
 last_api_error = None
-last_market_summary = {}  # FIX 1: Store last summary to avoid duplicate alerts
-sent_alerts = {}  # FIX 2: Track sent alerts per asset
+last_market_summary = {}
+sent_alerts = {}
 
 COIN_NAMES = {"btc":"bitcoin","eth":"ethereum","bnb":"binancecoin","xrp":"ripple","sol":"solana"}
 ALL_COINS = ["btc","eth","bnb","xrp","sol"]
 
 # ==================== SEMAPHORES FOR RATE LIMITING ====================
 http_semaphore = asyncio.Semaphore(5)
-telegram_semaphore = asyncio.Semaphore(3)  # FIX 4: Limit concurrent Telegram messages
+telegram_semaphore = asyncio.Semaphore(3)
 
 # ==================== ASYNC DATABASE ====================
 DB_PATH = "bot_database.db"
@@ -201,17 +202,31 @@ async def soso_get(session, endpoint, params=None):
         logging.warning(f"soso_get failed: {e}")
         return None
 
-async def get_price(session, symbol):
+async def get_price(session, symbol, use_cache_only=False):
+    """Get price with option to use cache only to avoid rate limits"""
     sym = symbol.upper()
+    
+    # Try cache first
+    cached = await get_cached_data(f"price_{sym}", 60)
+    if cached and use_cache_only:
+        return cached
+    
+    # If cache only mode, return None if no cache
+    if use_cache_only:
+        return None
+    
     try:
         if SOSO_API_KEY:
             d = await soso_get(session, "token/price", {"symbol": sym})
             if d:
                 price = d.get("price") or d.get("last_price")
                 if price:
-                    return {"price": float(price), "change": float(d.get("change_24h",0) or 0), "source": "SoSoValue"}
+                    result = {"price": float(price), "change": float(d.get("change_24h",0) or 0), "source": "SoSoValue"}
+                    await set_cached_data(f"price_{sym}", result, 60)
+                    return result
     except Exception as e:
         logging.warning(f"SoSoValue price failed: {e}")
+    
     coin = COIN_NAMES.get(sym.lower())
     if coin:
         try:
@@ -219,29 +234,53 @@ async def get_price(session, symbol):
             if data:
                 d = data.get(coin, {})
                 if d.get("usd"):
-                    return {"price": float(d["usd"]), "change": float(d.get("usd_24h_change",0) or 0), "source": "CoinGecko"}
+                    result = {"price": float(d["usd"]), "change": float(d.get("usd_24h_change",0) or 0), "source": "CoinGecko"}
+                    await set_cached_data(f"price_{sym}", result, 60)
+                    return result
         except Exception as e:
             logging.warning(f"CoinGecko price failed: {e}")
+    
     for url in [f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT", f"https://data-api.binance.vision/api/v3/ticker/24hr?symbol={sym}USDT"]:
         try:
             data = await safe_get(session, url)
             if data and data.get("lastPrice"):
-                return {"price": float(data["lastPrice"]), "change": float(data.get("priceChangePercent",0) or 0), "source": "Binance"}
+                result = {"price": float(data["lastPrice"]), "change": float(data.get("priceChangePercent",0) or 0), "source": "Binance"}
+                await set_cached_data(f"price_{sym}", result, 60)
+                return result
         except Exception as e:
             logging.warning(f"Binance price failed: {e}")
             continue
+    
     try:
         data = await safe_get(session, f"https://www.okx.com/api/v5/market/ticker?instId={sym}-USDT")
         if data:
             last = data.get("data", [{}])[0].get("last")
             if last:
-                return {"price": float(last), "change": 0, "source": "OKX"}
+                result = {"price": float(last), "change": 0, "source": "OKX"}
+                await set_cached_data(f"price_{sym}", result, 60)
+                return result
     except Exception as e:
         logging.warning(f"OKX price failed: {e}")
+    
+    # Return cached even if expired
+    cached = await get_cached_data(f"price_{sym}", 300)
+    if cached:
+        return cached
+    
     return {"price": None, "change": 0, "source": "None"}
 
-async def get_indicators(session, symbol):
+async def get_indicators(session, symbol, use_cache_only=False):
+    """Get indicators with option to use cache only"""
     sym = symbol.upper()
+    
+    # Try cache first
+    cached = await get_cached_data(f"indicators_{sym}", 120)
+    if cached and use_cache_only:
+        return cached
+    
+    if use_cache_only:
+        return {"rsi": 55, "ema20": 0, "ema50": 0, "atr": 0, "vol_spike": False}
+    
     for url in [f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1h&limit=60", f"https://data-api.binance.vision/api/v3/klines?symbol={sym}USDT&interval=1h&limit=60"]:
         try:
             data = await safe_get(session, url)
@@ -256,10 +295,13 @@ async def get_indicators(session, symbol):
                 tr = [max(highs[i]-lows[i], abs(highs[i]-closes[i-1]), abs(lows[i]-closes[i-1])) for i in range(1,len(closes))]
                 atr = sum(tr[-14:])/14
                 vol = sum([float(x[5]) for x in data[-5:]]); avg_vol = sum([float(x[5]) for x in data[-20:]])/20
-                return {"rsi": round(rsi,1), "ema20": ema20, "ema50": ema50, "atr": atr, "vol_spike": vol > avg_vol*1.5}
+                result = {"rsi": round(rsi,1), "ema20": ema20, "ema50": ema50, "atr": atr, "vol_spike": vol > avg_vol*1.5}
+                await set_cached_data(f"indicators_{sym}", result, 120)
+                return result
         except Exception as e:
             logging.warning(f"Indicators failed for {sym}: {e}")
             continue
+    
     return {"rsi": 55, "ema20": 0, "ema50": 0, "atr": 0, "vol_spike": False}
 
 sodex = SoDEXExecutor(SODEX_API_KEY_NAME, SODEX_API_PRIVATE_KEY, SODEX_ACCOUNT_ID)
@@ -337,8 +379,9 @@ async def get_whale_data(session):
         return cached
     return []
 
-# ==================== REAL ETF FLOWS ====================
+# ==================== REAL ETF FLOWS (FIX 2) ====================
 async def get_etf_flows(session):
+    # Use SoSoValue ETF endpoint (remove dead bitcoinetf.com)
     if SOSO_API_KEY:
         try:
             data = await soso_get(session, "etf/flows")
@@ -346,16 +389,15 @@ async def get_etf_flows(session):
                 return data
         except Exception as e:
             logging.debug(f"SoSoValue ETF failed: {e}")
-    try:
-        data = await safe_get(session, "https://api.bitcoinetf.com/v1/flows")
-        if data:
-            return data
-    except Exception as e:
-        logging.debug(f"ETF API failed: {e}")
+    
+    # Fallback to cached data
     cached = await get_cached_data("etf", 60)
     if cached:
         return cached
-    return None
+    
+    # If no data available, return empty dict with fallback values
+    logging.warning("No ETF data available - using fallback")
+    return {"btc": {"inflow": 0, "sentiment": "NEUTRAL", "date": datetime.now().strftime("%Y-%m-%d")}}
 
 # ==================== FUNDING RATES ====================
 async def get_funding_rates(session):
@@ -448,7 +490,11 @@ async def get_sector_data(session):
 
 # ==================== AI SCORING ENGINE ====================
 async def get_adaptive_weights(session):
-    btc = await get_price(session, "btc")
+    # Try to get BTC price from cache first (FIX 3)
+    btc = await get_price(session, "btc", use_cache_only=True)
+    if not btc or not btc["price"]:
+        btc = await get_price(session, "btc")
+    
     if not btc or not btc["price"]:
         return {"trend": 35, "liquidity": 20, "funding": 10, "volume": 10, "whales": 10, "etf": 10, "rsi": 5}
     
@@ -461,14 +507,20 @@ async def get_adaptive_weights(session):
     else:
         return {"trend": 35, "liquidity": 20, "funding": 10, "volume": 10, "whales": 10, "etf": 10, "rsi": 5}
 
-async def get_market_score(session, symbol, global_data=None):
+async def get_market_score(session, symbol, global_data=None, use_cache_only=False):
+    """Get market score with option to use cache only"""
     price, ind = await asyncio.gather(
-        get_price(session, symbol),
-        get_indicators(session, symbol)
+        get_price(session, symbol, use_cache_only),
+        get_indicators(session, symbol, use_cache_only)
     )
     
-    if not price["price"]:
-        return None
+    if not price or not price.get("price"):
+        if use_cache_only:
+            return None
+        # Try once more without cache
+        price = await get_price(session, symbol, False)
+        if not price or not price.get("price"):
+            return None
     
     if not global_data:
         global_data = await fetch_global_data(session)
@@ -485,7 +537,7 @@ async def get_market_score(session, symbol, global_data=None):
     
     # 1. Market Trend
     trend_score = 0
-    if ind["ema20"] and ind["ema50"]:
+    if ind.get("ema20") and ind.get("ema50"):
         if ind["ema20"] > ind["ema50"]:
             trend_score += 15
             breakdown.append("📈 Trend: Bullish (+15)")
@@ -493,16 +545,17 @@ async def get_market_score(session, symbol, global_data=None):
             trend_score -= 10
             breakdown.append("📉 Trend: Bearish (-10)")
     
-    if price["change"] > 2:
-        trend_score += 10
-        breakdown.append(f"📊 24h Change: +{price['change']:.1f}% (+10)")
-    elif price["change"] < -2:
-        trend_score -= 10
-        breakdown.append(f"📊 24h Change: {price['change']:.1f}% (-10)")
-    else:
-        breakdown.append(f"📊 24h Change: {price['change']:.1f}% (0)")
+    if price.get("change"):
+        if price["change"] > 2:
+            trend_score += 10
+            breakdown.append(f"📊 24h Change: +{price['change']:.1f}% (+10)")
+        elif price["change"] < -2:
+            trend_score -= 10
+            breakdown.append(f"📊 24h Change: {price['change']:.1f}% (-10)")
+        else:
+            breakdown.append(f"📊 24h Change: {price['change']:.1f}% (0)")
     
-    if abs(price["change"]) > 5:
+    if abs(price.get("change", 0)) > 5:
         trend_score += 5 if price["change"] > 0 else -5
         breakdown.append("🚀 Strong Momentum")
     
@@ -510,7 +563,7 @@ async def get_market_score(session, symbol, global_data=None):
     
     # 2. Liquidity
     liquidity_score = 0
-    if ind["vol_spike"]:
+    if ind.get("vol_spike"):
         liquidity_score += 15
         breakdown.append("📊 Volume Spike (+15)")
     for f in funding:
@@ -537,7 +590,7 @@ async def get_market_score(session, symbol, global_data=None):
     
     # 4. Volume
     volume_score = 0
-    if ind["vol_spike"]:
+    if ind.get("vol_spike"):
         volume_score += 10
         breakdown.append("Volume: Spike (+10)")
     else:
@@ -570,14 +623,15 @@ async def get_market_score(session, symbol, global_data=None):
     
     # 7. RSI
     rsi_score = 0
-    if ind["rsi"] < 35:
-        rsi_score += 5
-        breakdown.append(f"RSI: Oversold {ind['rsi']} (+5)")
-    elif ind["rsi"] > 70:
-        rsi_score -= 5
-        breakdown.append(f"RSI: Overbought {ind['rsi']} (-5)")
-    else:
-        breakdown.append(f"RSI: Neutral {ind['rsi']} (0)")
+    if ind.get("rsi"):
+        if ind["rsi"] < 35:
+            rsi_score += 5
+            breakdown.append(f"RSI: Oversold {ind['rsi']} (+5)")
+        elif ind["rsi"] > 70:
+            rsi_score -= 5
+            breakdown.append(f"RSI: Overbought {ind['rsi']} (-5)")
+        else:
+            breakdown.append(f"RSI: Neutral {ind['rsi']} (0)")
     score += rsi_score * (weights["rsi"] / 100)
     
     score = max(0, min(100, round(score)))
@@ -609,17 +663,17 @@ async def get_market_score(session, symbol, global_data=None):
     
     return {
         "symbol": symbol.upper(),
-        "price": price["price"],
-        "change": price["change"],
+        "price": price.get("price", 0),
+        "change": price.get("change", 0),
         "score": score,
         "bias": bias,
         "action": action,
         "breakdown": breakdown,
-        "source": price["source"],
+        "source": price.get("source", "Unknown"),
         "emoji": emoji,
         "timestamp": datetime.now().isoformat(),
-        "rsi": ind["rsi"],
-        "atr": ind["atr"],
+        "rsi": ind.get("rsi", 50),
+        "atr": ind.get("atr", 0.01),
         "weights": weights
     }
 
@@ -631,7 +685,7 @@ async def check_positions(session, app):
         
         for pos in positions:
             price_data = await get_price(session, pos['symbol'].lower())
-            if not price_data["price"]:
+            if not price_data.get("price"):
                 continue
             
             current = price_data["price"]
@@ -666,19 +720,19 @@ async def check_positions(session, app):
                     if ALERT_CHAT_ID:
                         try:
                             async with telegram_semaphore:
-                                await asyncio.sleep(0.3)  # FIX 4: Rate limit
+                                await asyncio.sleep(0.3)
                                 await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=msg)
                         except Exception as e:
                             logging.warning(f"Failed to send close alert: {e}")
 
 # ==================== INTELLIGENCE ENGINE ====================
-async def intelligence_engine(session, symbol, global_data=None):
-    score_data = await get_market_score(session, symbol, global_data)
+async def intelligence_engine(session, symbol, global_data=None, use_cache_only=False):
+    score_data = await get_market_score(session, symbol, global_data, use_cache_only)
     if not score_data:
         return None
     
-    price = score_data["price"]
-    atr = score_data["atr"] or price * 0.015
+    price = score_data.get("price", 0)
+    atr = score_data.get("atr", price * 0.015)
     
     score = score_data["score"]
     if score >= 65:
@@ -709,20 +763,20 @@ async def intelligence_engine(session, symbol, global_data=None):
     return {
         "symbol": symbol.upper(),
         "price": price,
-        "change": score_data["change"],
+        "change": score_data.get("change", 0),
         "entry": entry,
         "sl": sl,
         "tp": tp,
         "rr": rr,
         "confidence": min(96, max(55, score)),
         "bias": bias,
-        "reasons": [f"• {b}" for b in score_data["breakdown"][:5]],
-        "checks": [f"{'✅' if i%2==0 else '⚠️'} {b}" for i, b in enumerate(score_data["breakdown"][:4])],
-        "rsi": score_data["rsi"],
+        "reasons": [f"• {b}" for b in score_data.get("breakdown", [])[:5]],
+        "checks": [f"{'✅' if i%2==0 else '⚠️'} {b}" for i, b in enumerate(score_data.get("breakdown", [])[:4])],
+        "rsi": score_data.get("rsi", 50),
         "atr": atr,
         "qty": qty,
-        "source": score_data["source"],
-        "action": score_data["action"],
+        "source": score_data.get("source", "Unknown"),
+        "action": score_data.get("action", "Hold"),
         "score": score
     }
 
@@ -778,7 +832,7 @@ async def get_portfolio(session):
         result = []
         for pos in positions:
             price_data = await get_price(session, pos['symbol'].lower())
-            current = price_data["price"] if price_data["price"] else pos['entry']
+            current = price_data["price"] if price_data.get("price") else pos['entry']
             
             if pos['bias'] == 'LONG':
                 pnl = (current - pos['entry']) * pos['qty']
@@ -837,7 +891,8 @@ async def refresh_global_data(app):
             if global_data:
                 cached_scores = {}
                 for coin in ALL_COINS:
-                    score = await get_market_score(session, coin, global_data)
+                    # Use cache-only to avoid rate limits
+                    score = await get_market_score(session, coin, global_data, use_cache_only=True)
                     if score:
                         cached_scores[coin] = score
                 
@@ -865,7 +920,7 @@ async def get_global_data(app):
     
     return global_data
 
-# ==================== AUTONOMOUS SCANNER (FIXES 1, 2, 3, 4) ====================
+# ==================== AUTONOMOUS SCANNER ====================
 async def autonomous_scanner(app):
     global scanner_alive, telegram_connected, last_scan_time, avg_scan_duration, last_market_summary
     logging.info(f"🤖 Autonomous scanner started - interval {SCAN_INTERVAL}s, min confidence {MIN_CONFIDENCE}%")
@@ -890,19 +945,18 @@ async def autonomous_scanner(app):
             analytics["auto_scans"] += 1
             logging.info(f"🔍 [AutoScan #{analytics['auto_scans']}] Scanning {len(ALL_COINS)} coins...")
             
-            # Scan all coins in parallel
+            # Scan all coins in parallel - use cache-only mode
             scan_tasks = []
             for coin in ALL_COINS:
-                scan_tasks.append(scan_coin(session, coin, global_data, app))
+                scan_tasks.append(scan_coin(session, coin, global_data, app, use_cache_only=True))
             
             results = await asyncio.gather(*scan_tasks)
             
-            # FIX 1: Combine all new signals into ONE message instead of multiple
+            # Combine all new signals into ONE message
             new_signals = [r for r in results if r and r.get('new_alert')]
             alerts_sent = 0
             
             if new_signals:
-                # Build combined market summary
                 summary = "🤖 **AGENTIC MARKET SUMMARY**\n\n"
                 summary += f"📊 {len(new_signals)} new signals detected\n\n"
                 
@@ -915,10 +969,9 @@ async def autonomous_scanner(app):
                 
                 summary += f"⚡ Auto-detected by Agentic Finance"
                 
-                # Send ONE combined message
                 if ALERT_CHAT_ID:
                     try:
-                        async with telegram_semaphore:  # FIX 4: Rate limit
+                        async with telegram_semaphore:
                             await asyncio.sleep(0.3)
                             kb = InlineKeyboardMarkup([
                                 [InlineKeyboardButton("📊 View All Signals", callback_data="market_pulse")],
@@ -941,7 +994,6 @@ async def autonomous_scanner(app):
                     alerts_sent = len(new_signals)
                     analytics["alerts"] += alerts_sent
                 
-                # Store last summary for comparison
                 last_market_summary = {s['signal']['symbol']: s['signal']['confidence'] for s in new_signals}
             
             scanner_alive = True
@@ -958,10 +1010,8 @@ async def autonomous_scanner(app):
         
         await asyncio.sleep(SCAN_INTERVAL)
 
-async def scan_coin(session, coin, global_data, app):
-    """FIX 3: Log asset loading for debugging"""
+async def scan_coin(session, coin, global_data, app, use_cache_only=False):
     try:
-        # Log asset info (FIX 3)
         logging.debug(f"Scanning asset: {coin}")
         
         # Check if already have a position
@@ -971,7 +1021,6 @@ async def scan_coin(session, coin, global_data, app):
             if count > 0:
                 return None
         
-        # Clean old alert timestamps
         await clean_old_alerts()
         
         now = datetime.now().timestamp()
@@ -979,17 +1028,15 @@ async def scan_coin(session, coin, global_data, app):
         if now - last < 3600:
             return None
         
-        sig = await intelligence_engine(session, coin, global_data)
+        sig = await intelligence_engine(session, coin, global_data, use_cache_only)
         if not sig:
             return None
         
-        # FIX 2: Only send alert if confidence increased significantly
         last_conf = sent_alerts.get(coin, 0)
         if sig["confidence"] >= MIN_CONFIDENCE and sig["bias"] != "NEUTRAL":
-            # Only send if confidence increased by at least 5% or it's a new alert
             if sig["confidence"] > last_conf + 5 or last_conf == 0:
                 last_alert_time[coin] = now
-                sent_alerts[coin] = sig["confidence"]  # Track last sent confidence
+                sent_alerts[coin] = sig["confidence"]
                 
                 return {
                     "new_alert": True,
@@ -1372,7 +1419,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             closed_count = 0
             for pos in positions:
                 price_data = await get_price(session, pos['symbol'].lower())
-                if price_data["price"]:
+                if price_data.get("price"):
                     await close_position(pos['id'], price_data["price"])
                     closed_count += 1
             
@@ -1472,7 +1519,6 @@ async def main():
     try:
         logging.info("===== LOADING SODEX SYMBOLS =====")
         await load_symbols(shared_session)
-        # FIX 3: Log loaded assets count
         logging.info(f"===== LOADED {len(SYMBOL_IDS)} SYMBOLS =====")
         if len(SYMBOL_IDS) > 0:
             logging.info(f"===== SAMPLE SYMBOLS: {list(SYMBOL_IDS.items())[:5]} =====")
