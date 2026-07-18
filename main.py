@@ -4,6 +4,8 @@ import logging
 import json
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
+from collections import OrderedDict
+import time
 
 import aiosqlite
 import psutil
@@ -75,9 +77,64 @@ log = logging.getLogger(__name__)
 COINS = ["btc", "eth", "bnb", "xrp", "sol"]
 COIN_NAMES = {"btc": "bitcoin", "eth": "ethereum", "bnb": "binancecoin", "xrp": "ripple", "sol": "solana"}
 COIN_SYMBOLS = {"btc": "₿", "eth": "Ξ", "bnb": "🟡", "xrp": "✕", "sol": "◎"}
+SECTOR_MAP = {
+    "AI": ["ETH", "SOL"],
+    "L1": ["BTC", "BNB", "SOL"],
+    "Payments": ["XRP"],
+    "Exchange": ["BNB"]
+}
 SOSO_HEADERS = {"x-soso-api-key": Config.SOSO_API_KEY or "", "Accept": "application/json"}
 DB_PATH = "bot_database.db"
 TIMEOUT = ClientTimeout(total=20)
+
+# ============================================================================
+# IN-MEMORY CACHE (Faster than SQLite)
+# ============================================================================
+
+class TTLCache:
+    """Thread-safe TTL cache with max size."""
+    def __init__(self, maxsize=1000, ttl=300):
+        self._cache = OrderedDict()
+        self._maxsize = maxsize
+        self._ttl = ttl
+        self._lock = asyncio.Lock()
+    
+    async def get(self, key):
+        async with self._lock:
+            if key not in self._cache:
+                return None
+            data, timestamp = self._cache[key]
+            if time.monotonic() - timestamp > self._ttl:
+                del self._cache[key]
+                return None
+            self._cache.move_to_end(key)
+            return data
+    
+    async def set(self, key, value):
+        async with self._lock:
+            if len(self._cache) >= self._maxsize:
+                self._cache.popitem(last=False)
+            self._cache[key] = (value, time.monotonic())
+            self._cache.move_to_end(key)
+
+# Global cache instance
+_cache = TTLCache(maxsize=1000, ttl=300)
+
+async def get_cached(key: str, max_age: int = 300):
+    """Get cached data from memory."""
+    data = await _cache.get(key)
+    if data:
+        # Check if expired
+        if isinstance(data, dict) and "expires" in data:
+            if time.monotonic() > data["expires"]:
+                return None
+        return data
+    return None
+
+async def set_cached(key: str, data, ttl: int = 300):
+    """Cache data in memory with TTL."""
+    data["expires"] = time.monotonic() + ttl
+    await _cache.set(key, data)
 
 # ============================================================================
 # STATE
@@ -99,10 +156,22 @@ class State:
         "live_trades": 0,
         "signals": 0,
         "alerts": 0,
-        "auto_scans": 0
+        "auto_scans": 0,
+        "failed_signals": 0
     }
     last_alert_time = {}
     sent_alerts = {}
+    
+    # Shared database connection pool
+    db_conn = None
+    db_lock = asyncio.Lock()
+    
+    # Order execution lock (prevents race conditions)
+    order_lock = asyncio.Lock()
+    
+    # Signal cache (reuse signals for 60 seconds)
+    signal_cache = {}
+    signal_cache_time = {}
 
 # ============================================================================
 # HELPERS
@@ -123,74 +192,81 @@ def fmt(p):
     return f"{p:,.0f}"
 
 # ============================================================================
-# DATABASE
+# DATABASE (Connection Pool)
 # ============================================================================
 
-async def init_db():
-    """Initialize database with tables and indexes."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript("""
-            PRAGMA journal_mode=WAL;
-            PRAGMA synchronous=NORMAL;
-            PRAGMA foreign_keys=ON;
-            
-            CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, bias TEXT, entry REAL, qty REAL, sl REAL, tp REAL,
-                status TEXT DEFAULT 'open',
-                opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                closed_at TIMESTAMP, realized_pnl REAL,
-                trail_start REAL, partial_tp1 REAL, partial_tp2 REAL,
-                tp1_done INTEGER DEFAULT 0, tp2_done INTEGER DEFAULT 0,
-                order_id TEXT, tx_hash TEXT, fill_price REAL, fees REAL
-            );
-            
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, bias TEXT, entry REAL, exit REAL, qty REAL,
-                pnl REAL, pnl_percent REAL, confidence INTEGER, score INTEGER,
-                rsi REAL, atr REAL, funding_rate REAL, whale_detected INTEGER,
-                sector_score REAL, order_id TEXT, tx_hash TEXT,
-                opened_at TIMESTAMP, closed_at TIMESTAMP
-            );
-            
-            CREATE TABLE IF NOT EXISTS cache (
-                key TEXT PRIMARY KEY, data TEXT, expires_at TIMESTAMP
-            );
-            
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE TABLE IF NOT EXISTS journal (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT, bias TEXT, entry REAL, exit REAL, qty REAL, pnl REAL,
-                confidence INTEGER, score INTEGER, rsi REAL, atr REAL,
-                funding_rate REAL, whale_detected INTEGER, sector_score REAL,
-                reason TEXT, order_id TEXT, tx_hash TEXT,
-                closed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
-            CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
-            CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades(closed_at);
-            CREATE INDEX IF NOT EXISTS idx_cache_key ON cache(key);
-        """)
-        await db.commit()
-        log.info("✅ Database ready")
+async def get_db_conn():
+    """Get shared database connection."""
+    if State.db_conn is None:
+        State.db_conn = await aiosqlite.connect(DB_PATH)
+        State.db_conn.row_factory = aiosqlite.Row
+    return State.db_conn
 
 @asynccontextmanager
 async def get_db():
     """Get database connection with auto-commit and rollback."""
-    async with aiosqlite.connect(DB_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        try:
-            yield conn
-        except Exception:
-            await conn.rollback()
-            raise
-        finally:
-            await conn.commit()
+    conn = await get_db_conn()
+    try:
+        yield conn
+    except Exception:
+        await conn.rollback()
+        raise
+    finally:
+        await conn.commit()
+
+async def init_db():
+    """Initialize database with tables and indexes."""
+    conn = await get_db_conn()
+    await conn.executescript("""
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;
+        PRAGMA foreign_keys=ON;
+        
+        CREATE TABLE IF NOT EXISTS positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT, bias TEXT, entry REAL, qty REAL, original_qty REAL,
+            sl REAL, tp REAL,
+            status TEXT DEFAULT 'open',
+            opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            closed_at TIMESTAMP, realized_pnl REAL,
+            trail_start REAL, partial_tp1 REAL, partial_tp2 REAL,
+            tp1_done INTEGER DEFAULT 0, tp2_done INTEGER DEFAULT 0,
+            order_id TEXT, tx_hash TEXT, fill_price REAL, fees REAL
+        );
+        
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT, bias TEXT, entry REAL, exit REAL, qty REAL,
+            pnl REAL, pnl_percent REAL, confidence INTEGER, score INTEGER,
+            rsi REAL, atr REAL, funding_rate REAL, whale_detected INTEGER,
+            sector_score REAL, order_id TEXT, tx_hash TEXT,
+            opened_at TIMESTAMP, closed_at TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS cache (
+            key TEXT PRIMARY KEY, data TEXT, expires_at TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE TABLE IF NOT EXISTS journal (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT, bias TEXT, entry REAL, exit REAL, qty REAL, pnl REAL,
+            confidence INTEGER, score INTEGER, rsi REAL, atr REAL,
+            funding_rate REAL, whale_detected INTEGER, sector_score REAL,
+            reason TEXT, order_id TEXT, tx_hash TEXT,
+            closed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
+        CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol);
+        CREATE INDEX IF NOT EXISTS idx_trades_closed ON trades(closed_at);
+        CREATE INDEX IF NOT EXISTS idx_cache_key ON cache(key);
+    """)
+    await conn.commit()
+    log.info("✅ Database ready")
 
 async def get_setting(key: str, default: str = None) -> str:
     """Get a setting from the database."""
@@ -203,28 +279,9 @@ async def set_setting(key: str, value: str) -> None:
     """Set a setting in the database."""
     async with get_db() as conn:
         await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-
-# ============================================================================
-# CACHE
-# ============================================================================
-
-async def get_cached(key: str, max_age: int = 300):
-    """Get cached data if not expired."""
-    async with get_db() as conn:
-        row = await conn.execute("SELECT data, expires_at FROM cache WHERE key = ?", (key,))
-        r = await row.fetchone()
-        if r and datetime.now() < datetime.fromisoformat(r["expires_at"]):
-            return json.loads(r["data"])
-    return None
-
-async def set_cached(key: str, data, ttl: int = 300) -> None:
-    """Cache data with TTL."""
-    async with get_db() as conn:
-        expires = (datetime.now() + timedelta(seconds=ttl)).isoformat()
-        await conn.execute(
-            "INSERT OR REPLACE INTO cache (key, data, expires_at) VALUES (?, ?, ?)",
-            (key, json.dumps(data), expires)
-        )
+        # Also update memory for emergency stop
+        if key == "emergency_stop":
+            State.emergency_stop = value.lower() == "true"
 
 # ============================================================================
 # INDICATORS
@@ -281,7 +338,9 @@ def wilder_atr(highs, lows, closes, period=14):
 # API HELPERS
 # ============================================================================
 
-_semaphore = asyncio.Semaphore(5)
+_semaphore = asyncio.Semaphore(10)
+_coingecko_cache = None
+_coingecko_cache_time = 0
 
 async def safe_get(session, url, headers=None, retries=3):
     """Make HTTP request with retry and rate limiting."""
@@ -291,13 +350,40 @@ async def safe_get(session, url, headers=None, retries=3):
                 async with session.get(url, headers=headers or {}, timeout=TIMEOUT) as r:
                     if r.status == 200:
                         return await r.json()
-                    if r.status == 429:
-                        await asyncio.sleep((2 ** attempt) * 5)
-        except Exception:
+                    # Retry on rate limit and server errors
+                    if r.status in (429, 500, 502, 503, 504):
+                        wait = (2 ** attempt) * (5 if r.status == 429 else 2)
+                        log.warning(f"HTTP {r.status}, retrying in {wait}s")
+                        await asyncio.sleep(wait)
+                        continue
+                    return None
+        except Exception as e:
+            log.warning(f"HTTP attempt {attempt+1} failed: {e}")
             if attempt < retries - 1:
                 await asyncio.sleep(2 ** attempt)
             else:
                 raise
+    return None
+
+async def get_coingecko_batch(session):
+    """Fetch all coin prices in one request."""
+    global _coingecko_cache, _coingecko_cache_time
+    
+    now = time.monotonic()
+    if _coingecko_cache and now - _coingecko_cache_time < 60:
+        return _coingecko_cache
+    
+    try:
+        data = await safe_get(
+            session,
+            f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(COIN_NAMES.values())}&vs_currencies=usd&include_24hr_change=true"
+        )
+        if data:
+            _coingecko_cache = data
+            _coingecko_cache_time = now
+            return data
+    except Exception as e:
+        log.debug(f"CoinGecko batch failed: {e}")
     return None
 
 # ============================================================================
@@ -308,7 +394,9 @@ async def get_price(session, symbol, use_cache=False):
     """Get current price with fallbacks."""
     sym = symbol.upper()
     if use_cache:
-        return await get_cached(f"price_{sym}", 60)
+        cached = await get_cached(f"price_{sym}")
+        if cached:
+            return cached
     
     # Try SoSoValue
     if Config.SOSO_API_KEY:
@@ -338,10 +426,7 @@ async def get_price(session, symbol, use_cache=False):
     
     # Try CoinGecko (batch request)
     try:
-        data = await safe_get(
-            session,
-            f"https://api.coingecko.com/api/v3/simple/price?ids={','.join(COIN_NAMES.values())}&vs_currencies=usd&include_24hr_change=true"
-        )
+        data = await get_coingecko_batch(session)
         if data:
             coin = COIN_NAMES.get(sym.lower())
             if coin and data.get(coin, {}).get("usd"):
@@ -369,13 +454,15 @@ async def get_price(session, symbol, use_cache=False):
     except Exception as e:
         log.debug(f"Binance price failed: {e}")
     
-    return await get_cached(f"price_{sym}", 300)
+    return await get_cached(f"price_{sym}")
 
 async def get_indicators(session, symbol, use_cache=False):
     """Get technical indicators."""
     sym = symbol.upper()
     if use_cache:
-        return await get_cached(f"indicators_{sym}", 120)
+        cached = await get_cached(f"indicators_{sym}")
+        if cached:
+            return cached
     
     try:
         data = await safe_get(session, f"https://api.binance.com/api/v3/klines?symbol={sym}USDT&interval=1h&limit=60")
@@ -433,56 +520,57 @@ async def check_signer(session):
         log.warning(f"⚠️ Signer unreachable: {e}")
 
 async def execute_order(session, symbol, bias, entry, qty, sl, tp):
-    """Execute an order via the signer service."""
-    if not State.signer_ready:
-        return {"ok": False, "error": "Signer offline"}
-    if State.emergency_stop:
-        return {"ok": False, "error": "Emergency stop active"}
-    if await has_open_position(symbol):
-        return {"ok": False, "error": f"Position already open for {symbol}"}
-    
-    payload = {
-        "symbol": symbol,
-        "side": bias,
-        "price": entry,
-        "quantity": qty,
-        "stop_loss": sl,
-        "take_profit": tp
-    }
-    
-    for attempt in range(Config.MAX_RETRIES):
-        try:
-            log.info(f"📤 Executing {symbol} {bias} (attempt {attempt+1})")
-            async with session.post(
-                f"{Config.SIGNER_URL}/execute",
-                json=payload,
-                timeout=ClientTimeout(total=30)
-            ) as r:
-                result = await r.json()
-                if r.status == 200 and result.get("success"):
-                    data = result.get("data", {})
-                    await open_position_full(
-                        symbol, bias, entry, qty, sl, tp,
-                        data.get("order_id"),
-                        data.get("tx_hash"),
-                        data.get("fill_price", entry),
-                        data.get("fees", 0)
-                    )
-                    log.info(f"✅ Order filled: {symbol} {bias}")
-                    return {"ok": True, **data}
-                
-                log.warning(f"Attempt {attempt+1} failed: {result.get('error')}")
+    """Execute an order via the signer service with race protection."""
+    async with State.order_lock:
+        if not State.signer_ready:
+            return {"ok": False, "error": "Signer offline"}
+        if State.emergency_stop:
+            return {"ok": False, "error": "Emergency stop active"}
+        if await has_open_position(symbol):
+            return {"ok": False, "error": f"Position already open for {symbol}"}
+        
+        payload = {
+            "symbol": symbol,
+            "side": bias,
+            "price": entry,
+            "quantity": qty,
+            "stop_loss": sl,
+            "take_profit": tp
+        }
+        
+        for attempt in range(Config.MAX_RETRIES):
+            try:
+                log.info(f"📤 Executing {symbol} {bias} (attempt {attempt+1})")
+                async with session.post(
+                    f"{Config.SIGNER_URL}/execute",
+                    json=payload,
+                    timeout=ClientTimeout(total=30)
+                ) as r:
+                    result = await r.json()
+                    if r.status == 200 and result.get("success"):
+                        data = result.get("data", {})
+                        await open_position_full(
+                            symbol, bias, entry, qty, sl, tp,
+                            data.get("order_id"),
+                            data.get("tx_hash"),
+                            data.get("fill_price", entry),
+                            data.get("fees", 0)
+                        )
+                        log.info(f"✅ Order filled: {symbol} {bias}")
+                        return {"ok": True, **data}
+                    
+                    log.warning(f"Attempt {attempt+1} failed: {result.get('error')}")
+                    if attempt < Config.MAX_RETRIES - 1:
+                        await asyncio.sleep(2 ** attempt * 2)
+            except Exception as e:
+                log.warning(f"Attempt {attempt+1} error: {e}")
                 if attempt < Config.MAX_RETRIES - 1:
                     await asyncio.sleep(2 ** attempt * 2)
-        except Exception as e:
-            log.warning(f"Attempt {attempt+1} error: {e}")
-            if attempt < Config.MAX_RETRIES - 1:
-                await asyncio.sleep(2 ** attempt * 2)
-    
-    return {"ok": False, "error": "Max retries exceeded"}
+        
+        return {"ok": False, "error": "Max retries exceeded"}
 
 # ============================================================================
-# POSITIONS
+# POSITIONS (with transactions)
 # ============================================================================
 
 async def open_position_full(symbol, bias, entry, qty, sl, tp, order_id=None, tx_hash=None, fill_price=None, fees=0):
@@ -493,12 +581,12 @@ async def open_position_full(symbol, bias, entry, qty, sl, tp, order_id=None, tx
         partial2 = entry + (tp - entry) * 0.7 if bias == "LONG" else entry - (entry - tp) * 0.7
         cursor = await conn.execute("""
             INSERT INTO positions (
-                symbol, bias, entry, qty, sl, tp,
+                symbol, bias, entry, qty, original_qty, sl, tp,
                 trail_start, partial_tp1, partial_tp2,
                 order_id, tx_hash, fill_price, fees
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            symbol.upper(), bias, entry, qty, sl, tp,
+            symbol.upper(), bias, entry, qty, qty, sl, tp,
             trail, partial1, partial2,
             order_id, tx_hash, fill_price or entry, fees
         ))
@@ -514,14 +602,18 @@ async def has_open_position(symbol):
         return (await row.fetchone())[0] > 0
 
 async def close_position(pos_id, exit_price, reason=""):
-    """Close a position and record the trade."""
+    """Close a position and record the trade (atomic transaction)."""
     async with get_db() as conn:
+        # Use transaction for consistency
+        await conn.execute("BEGIN IMMEDIATE")
+        
         row = await conn.execute(
             "SELECT symbol, bias, entry, qty, order_id, tx_hash FROM positions WHERE id = ? AND status='open'",
             (pos_id,)
         )
         pos = await row.fetchone()
         if not pos:
+            await conn.execute("ROLLBACK")
             return None
         
         pnl = (exit_price - pos["entry"]) * pos["qty"] if pos["bias"] == "LONG" else (pos["entry"] - exit_price) * pos["qty"]
@@ -546,7 +638,17 @@ async def close_position(pos_id, exit_price, reason=""):
                 order_id, tx_hash, closed_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         """, (pos["symbol"], pos["bias"], pos["entry"], exit_price, pos["qty"], pnl, reason, pos["order_id"], pos["tx_hash"]))
+        
+        await conn.execute("COMMIT")
         return {"pnl": pnl, "pnl_percent": pnl_pct}
+
+async def get_open_positions():
+    """Get all open positions."""
+    async with get_db() as conn:
+        rows = await conn.execute(
+            "SELECT symbol, bias, entry, qty, original_qty, tp, sl FROM positions WHERE status='open'"
+        )
+        return await rows.fetchall()
 
 async def get_open_positions_count():
     """Get count of open positions."""
@@ -567,6 +669,10 @@ async def get_daily_pnl():
 
 async def get_funding_rates(session):
     """Get funding rates from Binance."""
+    cached = await get_cached("funding")
+    if cached:
+        return cached
+    
     try:
         data = await safe_get(session, "https://fapi.binance.com/fapi/v1/premiumIndex")
         if data:
@@ -585,29 +691,41 @@ async def get_funding_rates(session):
                 return rates
     except Exception as e:
         log.debug(f"Funding failed: {e}")
-    return await get_cached("funding", 60) or []
+    return []
 
 async def get_etf_flows(session):
     """Get ETF flows from SoSoValue."""
+    cached = await get_cached("etf")
+    if cached:
+        return cached
+    
     if Config.SOSO_API_KEY:
         try:
             data = await safe_get(session, f"{Config.SOSO_BASE}/etf/flows", headers=SOSO_HEADERS)
             if data and data.get("code") == 0:
-                return data.get("data", {})
+                etf_data = data.get("data", {})
+                await set_cached("etf", etf_data, 60)
+                return etf_data
         except Exception:
             pass
-    return await get_cached("etf", 60) or {}
+    return {}
 
 async def get_whale_data(session):
     """Get whale activity data."""
+    cached = await get_cached("whales")
+    if cached:
+        return cached
+    
     if Config.SOSO_API_KEY:
         try:
             data = await safe_get(session, f"{Config.SOSO_BASE}/market/whale", headers=SOSO_HEADERS)
             if data and data.get("code") == 0:
-                return data.get("data", [])
+                whale_data = data.get("data", [])
+                await set_cached("whales", whale_data, 60)
+                return whale_data
         except Exception:
             pass
-    return await get_cached("whales", 60) or []
+    return []
 
 # ============================================================================
 # SCORING ENGINE
@@ -628,136 +746,167 @@ def calc_position_size(entry, sl, account=Config.ACCOUNT_SIZE, risk=Config.RISK_
     qty = max(min_qty, min(qty, max_qty))
     return round(qty / step) * step
 
-async def get_signal(session, symbol, global_data=None, use_cache=False):
-    """Generate a trading signal."""
-    price, ind = await asyncio.gather(
-        get_price(session, symbol, use_cache),
-        get_indicators(session, symbol, use_cache)
-    )
-    if not price or price.get("price") is None or not ind:
-        return None
+async def get_signal(session, symbol, global_data=None, use_cache=False, price=None, indicators=None):
+    """Generate a trading signal with detailed logging."""
+    # Check signal cache
+    cache_key = f"{symbol}_{int(time.monotonic() / 60)}"
+    if use_cache and cache_key in State.signal_cache:
+        return State.signal_cache[cache_key]
     
-    if global_data:
-        funding = global_data.get("funding", [])
-        whales = global_data.get("whales", [])
-        etf = global_data.get("etf", {})
-    else:
-        funding, whales, etf = await asyncio.gather(
-            get_funding_rates(session),
-            get_whale_data(session),
-            get_etf_flows(session)
-        )
-    
-    score = 50
-    breakdown = []
-    
-    # Trend (35%)
-    trend = 0
-    if ind.get("ema20") is not None and ind.get("ema50") is not None:
-        trend += 15 if ind["ema20"] > ind["ema50"] else -10
-        breakdown.append("📈 Bullish" if ind["ema20"] > ind["ema50"] else "📉 Bearish")
-    
-    if price.get("change") is not None:
-        if price["change"] > 2:
-            trend += 10
-            breakdown.append(f"📊 +{price['change']:.1f}%")
-        elif price["change"] < -2:
-            trend -= 10
-            breakdown.append(f"📊 {price['change']:.1f}%")
-    score += trend * 0.35
-    
-    # Volume (15%)
-    vol = 15 if ind.get("vol_spike") else 0
-    if vol:
-        breakdown.append("📊 Volume Spike")
-    score += vol * 0.15
-    
-    # RSI (10%)
-    if ind.get("rsi") is not None:
-        rsi = ind["rsi"]
-        if rsi < 35:
-            score += 10
-            breakdown.append(f"📊 RSI Oversold {rsi:.0f}")
-        elif rsi > 70:
-            score -= 10
-            breakdown.append(f"📊 RSI Overbought {rsi:.0f}")
+    try:
+        # Use provided price/indicators or fetch them
+        if price is None or indicators is None:
+            price, indicators = await asyncio.gather(
+                get_price(session, symbol, use_cache),
+                get_indicators(session, symbol, use_cache)
+            )
+        
+        if not price:
+            log.warning(f"{symbol}: price unavailable")
+            return None
+        
+        if not indicators:
+            log.warning(f"{symbol}: indicators unavailable")
+            return None
+        
+        if indicators.get("atr") is None:
+            log.warning(f"{symbol}: ATR unavailable")
+            return None
+        
+        if global_data:
+            funding = global_data.get("funding", [])
+            whales = global_data.get("whales", [])
+            etf = global_data.get("etf", {})
         else:
-            breakdown.append(f"📊 RSI Neutral {rsi:.0f}")
-        score += (10 if rsi < 35 else -10 if rsi > 70 else 0) * 0.10
-    
-    # Funding (10%)
-    for f in funding:
-        if f.get("symbol") == symbol.upper():
-            if f["rate"] > 0.05:
+            funding, whales, etf = await asyncio.gather(
+                get_funding_rates(session),
+                get_whale_data(session),
+                get_etf_flows(session)
+            )
+        
+        score = 50
+        breakdown = []
+        
+        # Trend (35%)
+        trend = 0
+        if indicators.get("ema20") is not None and indicators.get("ema50") is not None:
+            trend += 15 if indicators["ema20"] > indicators["ema50"] else -10
+            breakdown.append("📈 Bullish" if indicators["ema20"] > indicators["ema50"] else "📉 Bearish")
+        
+        if price.get("change") is not None:
+            if price["change"] > 2:
+                trend += 10
+                breakdown.append(f"📊 +{price['change']:.1f}%")
+            elif price["change"] < -2:
+                trend -= 10
+                breakdown.append(f"📊 {price['change']:.1f}%")
+        score += trend * 0.35
+        
+        # Volume (15%)
+        vol = 15 if indicators.get("vol_spike") else 0
+        if vol:
+            breakdown.append("📊 Volume Spike")
+        score += vol * 0.15
+        
+        # RSI (10%)
+        if indicators.get("rsi") is not None:
+            rsi = indicators["rsi"]
+            if rsi < 35:
                 score += 10
-                breakdown.append(f"💰 {f['rate']:+.2f}%")
-            elif f["rate"] < -0.05:
+                breakdown.append(f"📊 RSI Oversold {rsi:.0f}")
+            elif rsi > 70:
                 score -= 10
-                breakdown.append(f"💰 {f['rate']:+.2f}%")
-            break
-    
-    # Whale (10%)
-    if any(w.get("symbol") == symbol.upper() for w in whales if isinstance(w, dict)):
-        score += 10
-        breakdown.append("🐳 Whale Activity")
-    
-    # ETF (10%)
-    if etf:
-        for key, value in etf.items():
-            if key.lower() == symbol.lower():
-                inflow = value.get("inflow", 0)
-                if inflow > 1_000_000:
+                breakdown.append(f"📊 RSI Overbought {rsi:.0f}")
+            else:
+                breakdown.append(f"📊 RSI Neutral {rsi:.0f}")
+            score += (10 if rsi < 35 else -10 if rsi > 70 else 0) * 0.10
+        
+        # Funding (10%)
+        for f in funding:
+            if f.get("symbol") == symbol.upper():
+                if f["rate"] > 0.05:
                     score += 10
-                    breakdown.append("🏦 Strong Inflow")
-                elif inflow > 500_000:
-                    score += 5
-                    breakdown.append("🏦 Moderate Inflow")
+                    breakdown.append(f"💰 {f['rate']:+.2f}%")
+                elif f["rate"] < -0.05:
+                    score -= 10
+                    breakdown.append(f"💰 {f['rate']:+.2f}%")
                 break
-    
-    score = max(0, min(100, round(score)))
-    
-    # Determine bias
-    if score >= 65:
-        bias, action, emoji = "LONG", "Accumulate", "🟢"
-        entry = price["price"] * 0.992
-        sl = entry - ind["atr"] * 1.2
-        tp = entry + ind["atr"] * 2.8
-    elif score <= 40:
-        bias, action, emoji = "SHORT", "Reduce", "🔴"
-        entry = price["price"] * 1.008
-        sl = entry + ind["atr"] * 1.2
-        tp = entry - ind["atr"] * 2.8
-    else:
+        
+        # Whale (10%)
+        if any(w.get("symbol") == symbol.upper() for w in whales if isinstance(w, dict)):
+            score += 10
+            breakdown.append("🐳 Whale Activity")
+        
+        # ETF (10%)
+        if etf:
+            for key, value in etf.items():
+                if key.lower() == symbol.lower():
+                    inflow = value.get("inflow", 0)
+                    if inflow > 1_000_000:
+                        score += 10
+                        breakdown.append("🏦 Strong Inflow")
+                    elif inflow > 500_000:
+                        score += 5
+                        breakdown.append("🏦 Moderate Inflow")
+                    break
+        
+        score = max(0, min(100, round(score)))
+        
+        # Determine bias
+        if score >= 65:
+            bias, action, emoji = "LONG", "Accumulate", "🟢"
+            entry = price["price"] * 0.992
+            sl = entry - indicators["atr"] * 1.2
+            tp = entry + indicators["atr"] * 2.8
+        elif score <= 40:
+            bias, action, emoji = "SHORT", "Reduce", "🔴"
+            entry = price["price"] * 1.008
+            sl = entry + indicators["atr"] * 1.2
+            tp = entry - indicators["atr"] * 2.8
+        else:
+            return None
+        
+        if indicators["atr"] is None or indicators["atr"] <= 0:
+            return None
+        
+        rr = abs(tp - entry) / abs(entry - sl) if entry != sl else 0
+        if rr < 1.5:
+            log.info(f"{symbol}: RR too low ({rr:.2f})")
+            return None
+        
+        qty = calc_position_size(entry, sl)
+        if qty is None or qty <= 0:
+            log.warning(f"{symbol}: position size failed")
+            return None
+        
+        result = {
+            "symbol": symbol.upper(),
+            "price": price["price"],
+            "change": price.get("change"),
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "rr": rr,
+            "confidence": score,
+            "bias": bias,
+            "action": action,
+            "emoji": emoji,
+            "qty": qty,
+            "rsi": indicators.get("rsi"),
+            "breakdown": breakdown[:4],
+            "score": score,
+            "source": price.get("source", "Unknown")
+        }
+        
+        # Cache signal for 60 seconds
+        if use_cache:
+            State.signal_cache[cache_key] = result
+        
+        return result
+    except Exception as e:
+        log.exception(f"Signal failed for {symbol}: {e}")
+        State.analytics["failed_signals"] += 1
         return None
-    
-    if ind["atr"] is None or ind["atr"] <= 0:
-        return None
-    
-    rr = abs(tp - entry) / abs(entry - sl) if entry != sl else 0
-    if rr < 1.5:
-        return None
-    
-    qty = calc_position_size(entry, sl)
-    if qty is None or qty <= 0:
-        return None
-    
-    return {
-        "symbol": symbol.upper(),
-        "price": price["price"],
-        "change": price.get("change"),
-        "entry": entry,
-        "sl": sl,
-        "tp": tp,
-        "rr": rr,
-        "confidence": score,
-        "bias": bias,
-        "action": action,
-        "emoji": emoji,
-        "qty": qty,
-        "rsi": ind.get("rsi"),
-        "breakdown": breakdown[:4],
-        "score": score
-    }
 
 # ============================================================================
 # POSITION MANAGEMENT
@@ -769,12 +918,19 @@ async def manage_positions(session, app):
         rows = await conn.execute("SELECT * FROM positions WHERE status='open'")
         positions = await rows.fetchall()
         
-        for pos in positions:
-            price = await get_price(session, pos["symbol"].lower())
-            if not price or price.get("price") is None:
+        if not positions:
+            return
+        
+        # Fetch all prices in parallel
+        prices = await asyncio.gather(
+            *[get_price(session, p["symbol"].lower()) for p in positions]
+        )
+        
+        for pos, price_data in zip(positions, prices):
+            if not price_data or price_data.get("price") is None:
                 continue
             
-            current = price["price"]
+            current = price_data["price"]
             entry = pos["entry"]
             sl = pos["sl"]
             tp = pos["tp"]
@@ -782,6 +938,7 @@ async def manage_positions(session, app):
             p2 = pos["partial_tp2"]
             tp1_done = pos["tp1_done"]
             tp2_done = pos["tp2_done"]
+            original_qty = pos["original_qty"]
             
             if pos["bias"] == "LONG":
                 # Trailing stop
@@ -789,38 +946,38 @@ async def manage_positions(session, app):
                     await conn.execute("UPDATE positions SET sl = ? WHERE id = ?", (entry, pos["id"]))
                     log.info(f"📊 Trailing stop: {pos['symbol']} -> breakeven")
                 
-                # Partial TP1 (40%) - only once
+                # Partial TP1 (40% of original) - only once
                 if current >= p1 and not tp1_done and pos["qty"] > 0.001:
-                    qty_close = pos["qty"] * 0.4
+                    qty_close = original_qty * 0.4
+                    qty_remaining = max(0, pos["qty"] - qty_close)
                     await conn.execute(
-                        "UPDATE positions SET qty = qty - ?, tp1_done = 1 WHERE id = ?",
-                        (qty_close, pos["id"])
+                        "UPDATE positions SET qty = ?, tp1_done = 1 WHERE id = ?",
+                        (qty_remaining, pos["id"])
                     )
                     log.info(f"📊 TP1: {pos['symbol']} at ${p1:.2f}")
                 
-                # Partial TP2 (30%) - only once
+                # Partial TP2 (30% of original) - only once
                 if current >= p2 and not tp2_done and pos["qty"] > 0.001:
-                    qty_close = pos["qty"] * 0.3
+                    qty_close = original_qty * 0.3
+                    qty_remaining = max(0, pos["qty"] - qty_close)
                     await conn.execute(
-                        "UPDATE positions SET qty = qty - ?, tp2_done = 1 WHERE id = ?",
-                        (qty_close, pos["id"])
+                        "UPDATE positions SET qty = ?, tp2_done = 1 WHERE id = ?",
+                        (qty_remaining, pos["id"])
                     )
                     log.info(f"📊 TP2: {pos['symbol']} at ${p2:.2f}")
                 
-                # Full TP
-                if current >= tp:
+                # Full TP (remaining)
+                if current >= tp and pos["qty"] > 0.001:
                     await close_position(pos["id"], tp, "TP Hit")
                     log.info(f"✅ {pos['symbol']} TP hit")
-                    if Config.ALERT_CHAT_ID:
-                        await app.bot.send_message(Config.ALERT_CHAT_ID, f"✅ {pos['symbol']} TP hit at ${tp:.2f}")
+                    await send_telegram_message(app, f"✅ {pos['symbol']} TP hit at ${tp:.2f}")
                     continue
                 
                 # SL
                 if current <= sl:
                     await close_position(pos["id"], sl, "SL Hit")
                     log.info(f"❌ {pos['symbol']} SL hit")
-                    if Config.ALERT_CHAT_ID:
-                        await app.bot.send_message(Config.ALERT_CHAT_ID, f"❌ {pos['symbol']} SL hit at ${sl:.2f}")
+                    await send_telegram_message(app, f"❌ {pos['symbol']} SL hit at ${sl:.2f}")
                     continue
             
             else:  # SHORT
@@ -829,39 +986,48 @@ async def manage_positions(session, app):
                     await conn.execute("UPDATE positions SET sl = ? WHERE id = ?", (entry, pos["id"]))
                     log.info(f"📊 Trailing stop: {pos['symbol']} -> breakeven")
                 
-                # Partial TP1 (40%) - only once
+                # Partial TP1 (40% of original) - only once
                 if current <= p1 and not tp1_done and pos["qty"] > 0.001:
-                    qty_close = pos["qty"] * 0.4
+                    qty_close = original_qty * 0.4
+                    qty_remaining = max(0, pos["qty"] - qty_close)
                     await conn.execute(
-                        "UPDATE positions SET qty = qty - ?, tp1_done = 1 WHERE id = ?",
-                        (qty_close, pos["id"])
+                        "UPDATE positions SET qty = ?, tp1_done = 1 WHERE id = ?",
+                        (qty_remaining, pos["id"])
                     )
                     log.info(f"📊 TP1: {pos['symbol']} at ${p1:.2f}")
                 
-                # Partial TP2 (30%) - only once
+                # Partial TP2 (30% of original) - only once
                 if current <= p2 and not tp2_done and pos["qty"] > 0.001:
-                    qty_close = pos["qty"] * 0.3
+                    qty_close = original_qty * 0.3
+                    qty_remaining = max(0, pos["qty"] - qty_close)
                     await conn.execute(
-                        "UPDATE positions SET qty = qty - ?, tp2_done = 1 WHERE id = ?",
-                        (qty_close, pos["id"])
+                        "UPDATE positions SET qty = ?, tp2_done = 1 WHERE id = ?",
+                        (qty_remaining, pos["id"])
                     )
                     log.info(f"📊 TP2: {pos['symbol']} at ${p2:.2f}")
                 
-                # Full TP
-                if current <= tp:
+                # Full TP (remaining)
+                if current <= tp and pos["qty"] > 0.001:
                     await close_position(pos["id"], tp, "TP Hit")
                     log.info(f"✅ {pos['symbol']} TP hit")
-                    if Config.ALERT_CHAT_ID:
-                        await app.bot.send_message(Config.ALERT_CHAT_ID, f"✅ {pos['symbol']} TP hit at ${tp:.2f}")
+                    await send_telegram_message(app, f"✅ {pos['symbol']} TP hit at ${tp:.2f}")
                     continue
                 
                 # SL
                 if current >= sl:
                     await close_position(pos["id"], sl, "SL Hit")
                     log.info(f"❌ {pos['symbol']} SL hit")
-                    if Config.ALERT_CHAT_ID:
-                        await app.bot.send_message(Config.ALERT_CHAT_ID, f"❌ {pos['symbol']} SL hit at ${sl:.2f}")
+                    await send_telegram_message(app, f"❌ {pos['symbol']} SL hit at ${sl:.2f}")
                     continue
+
+async def send_telegram_message(app, text):
+    """Send Telegram message with retry."""
+    if not Config.ALERT_CHAT_ID:
+        return
+    try:
+        await app.bot.send_message(Config.ALERT_CHAT_ID, text)
+    except Exception as e:
+        log.warning(f"Failed to send Telegram message: {e}")
 
 # ============================================================================
 # SCANNER
@@ -872,27 +1038,58 @@ async def refresh_data(app):
     session = app.bot_data["session"]
     while True:
         try:
+            start_time = time.monotonic()
             log.info("🔄 Refreshing market data...")
+            
             funding, whales, etf = await asyncio.gather(
                 get_funding_rates(session),
                 get_whale_data(session),
                 get_etf_flows(session)
             )
-            scores = {}
+            
+            global_data = {"funding": funding, "whales": whales, "etf": etf}
+            
+            # Fetch all coin data in parallel
+            tasks = []
             for coin in COINS:
-                sig = await get_signal(session, coin, {"funding": funding, "whales": whales, "etf": etf}, use_cache=True)
+                tasks.append(get_price(session, coin, use_cache=True))
+                tasks.append(get_indicators(session, coin, use_cache=True))
+            results = await asyncio.gather(*tasks)
+            
+            market = {}
+            for i, coin in enumerate(COINS):
+                market[coin] = {
+                    "price": results[i * 2],
+                    "indicators": results[i * 2 + 1]
+                }
+            
+            # Generate signals in parallel
+            signals = await asyncio.gather(*[
+                get_signal(session, coin, global_data, use_cache=True, 
+                          price=market[coin]["price"], 
+                          indicators=market[coin]["indicators"])
+                for coin in COINS
+            ])
+            
+            scores = {}
+            for coin, sig in zip(COINS, signals):
                 if sig:
                     scores[coin] = sig
+            
             app.bot_data["global_data"] = {
+                "market": market,
                 "scores": scores,
                 "funding": funding,
                 "whales": whales,
                 "etf": etf,
                 "timestamp": datetime.now().isoformat()
             }
-            log.info(f"✅ Data refreshed: {len(scores)} coins")
+            
+            elapsed = time.monotonic() - start_time
+            log.info(f"✅ Data refreshed: {len(scores)} signals, {len(market)} market entries ({elapsed:.1f}s)")
         except Exception as e:
             log.exception(f"Refresh error: {e}")
+        
         await asyncio.sleep(300)
 
 async def scanner_loop(app):
@@ -906,9 +1103,10 @@ async def scanner_loop(app):
                 await asyncio.sleep(Config.SCAN_INTERVAL)
                 continue
             
-            # Check emergency stop
-            if await get_setting("emergency_stop") == "true":
-                State.emergency_stop = True
+            scan_start = time.monotonic()
+            
+            # Check emergency stop (sync from database)
+            State.emergency_stop = (await get_setting("emergency_stop", "false")) == "true"
             
             # Check signer
             if not State.signer_ready or not sodex.ready:
@@ -922,8 +1120,7 @@ async def scanner_loop(app):
                     State.emergency_stop = True
                     await set_setting("emergency_stop", "true")
                     log.warning(f"⚠️ Emergency stop: Daily loss ${fmt(daily_loss)}")
-                    if Config.ALERT_CHAT_ID:
-                        await app.bot.send_message(Config.ALERT_CHAT_ID, f"⚠️ Emergency stop: Daily loss ${fmt(daily_loss)}")
+                    await send_telegram_message(app, f"⚠️ Emergency stop: Daily loss ${fmt(daily_loss)}")
                 await asyncio.sleep(Config.SCAN_INTERVAL)
                 continue
             
@@ -932,11 +1129,10 @@ async def scanner_loop(app):
                 await asyncio.sleep(Config.SCAN_INTERVAL)
                 continue
             
-            start = datetime.now()
             global_data = app.bot_data.get("global_data", {})
             State.analytics["auto_scans"] += 1
             
-            # Scan all coins
+            # Scan all coins in parallel
             signals = await asyncio.gather(*[
                 get_signal(session, coin, global_data, use_cache=True)
                 for coin in COINS
@@ -959,16 +1155,21 @@ async def scanner_loop(app):
                         summary += f"Entry: ${fmt(s['entry'])} | TP: ${fmt(s['tp'])} | SL: ${fmt(s['sl'])}\n\n"
                     
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 View", callback_data="dashboard")]])
-                    await app.bot.send_message(
-                        Config.ALERT_CHAT_ID,
-                        summary,
-                        parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=kb
-                    )
-                    State.analytics["alerts"] += len(valid)
+                    try:
+                        await app.bot.send_message(
+                            Config.ALERT_CHAT_ID,
+                            summary,
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=kb
+                        )
+                        State.analytics["alerts"] += len(valid)
+                    except Exception as e:
+                        log.warning(f"Failed to send alert: {e}")
                 
                 # Auto-execute best signal
                 top = valid[0]
+                log.info(f"🎯 Top signal: {top['symbol']} {top['score']} {top['confidence']}%")
+                
                 if top["confidence"] >= 75 and not await has_open_position(top["symbol"]):
                     log.info(f"🤖 Auto-executing {top['symbol']} {top['bias']}")
                     result = await execute_order(
@@ -983,21 +1184,21 @@ async def scanner_loop(app):
                     if result.get("ok"):
                         log.info(f"✅ Auto-execution successful: {top['symbol']}")
                         State.analytics["live_trades"] += 1
-                        if Config.ALERT_CHAT_ID:
-                            await app.bot.send_message(
-                                Config.ALERT_CHAT_ID,
-                                f"✅ **Auto-Executed**: {top['symbol']} {top['bias']}\nEntry: ${fmt(top['entry'])}",
-                                parse_mode=ParseMode.MARKDOWN
-                            )
+                        await send_telegram_message(app, f"✅ **Auto-Executed**: {top['symbol']} {top['bias']}\nEntry: ${fmt(top['entry'])}")
             
             State.last_scan_time = datetime.now()
-            State.avg_scan_duration = State.avg_scan_duration * 0.9 + (datetime.now() - start).total_seconds() * 0.1
+            elapsed = time.monotonic() - scan_start
+            State.avg_scan_duration = State.avg_scan_duration * 0.9 + elapsed * 0.1
             State.scanner_alive = True
+            
+            # Schedule next scan accounting for elapsed time
+            sleep_time = max(0, Config.SCAN_INTERVAL - elapsed)
+            await asyncio.sleep(sleep_time)
             
         except Exception as e:
             State.scanner_alive = False
             log.exception(f"Scanner error: {e}")
-        await asyncio.sleep(Config.SCAN_INTERVAL)
+            await asyncio.sleep(Config.SCAN_INTERVAL)
 
 # ============================================================================
 # TELEGRAM
@@ -1070,6 +1271,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=main_menu()
     )
 
+# ============================================================================
+# BUTTON HANDLER
+# ============================================================================
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle all callback queries."""
     q = update.callback_query
@@ -1084,14 +1289,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Dashboard
     if data == "dashboard":
         global_data = context.application.bot_data.get("global_data", {})
+        market = global_data.get("market", {})
         scores = global_data.get("scores", {})
-        sorted_scores = sorted(scores.items(), key=lambda x: x[1].get("score", 0), reverse=True)
         
         txt = "📊 **Dashboard**\n\n"
-        for symbol, sig in sorted_scores:
-            txt += f"{sig['emoji']} **{symbol.upper()}**\n"
-            txt += f"  Score: {sig['score']}/100 | {sig['bias']}\n"
-            txt += f"  ${fmt(sig['price'])} ({fmt(sig.get('change'))}%)\n\n"
+        for coin in COINS:
+            p = market.get(coin, {}).get("price")
+            sig = scores.get(coin)
+            
+            txt += f"**{coin.upper()}**\n"
+            if p:
+                txt += f"💰 ${fmt(p['price'])} ({fmt(p.get('change', 0))}%)\n"
+                txt += f"📡 {p.get('source', 'Unknown')}\n"
+            else:
+                txt += "💰 No price data\n"
+            
+            if sig:
+                txt += f"📊 {sig['bias']} ({sig['score']}/100)\n"
+                txt += f"Entry: ${fmt(sig['entry'])} | TP: ${fmt(sig['tp'])}\n"
+            else:
+                txt += "📊 NEUTRAL\n"
+            
+            txt += "\n"
         
         txt += f"📈 Signals: {State.daily_signals} | Alerts: {State.daily_alerts}\n"
         txt += f"🖊 Signer: {'🟢 Online' if State.signer_ready else '🔴 Offline'}\n"
@@ -1143,6 +1362,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
         return
     
+    # Portfolio
+    if data == "portfolio":
+        positions = await get_open_positions()
+        if not positions:
+            txt = "📂 No open positions."
+        else:
+            txt = "📂 **Open Positions**\n\n"
+            for r in positions:
+                txt += (
+                    f"**{r['symbol']} {r['bias']}**\n"
+                    f"Entry: ${fmt(r['entry'])}\n"
+                    f"Qty: {r['qty']:.4f}\n"
+                    f"TP: ${fmt(r['tp'])}\n"
+                    f"SL: ${fmt(r['sl'])}\n\n"
+                )
+        
+        await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
+        return
+    
     # Stats
     if data == "stats":
         await q.edit_message_text(
@@ -1152,6 +1390,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Daily PnL: ${fmt(await get_daily_pnl())}\n"
             f"Scans: {State.analytics['auto_scans']}\n"
             f"Signals: {State.analytics['signals']}\n"
+            f"Failed Signals: {State.analytics['failed_signals']}\n"
             f"Alerts: {State.analytics['alerts']}\n"
             f"Signer: {'🟢 Online' if State.signer_ready else '🔴 Offline'}\n"
             f"Stop: {'🔴 Active' if State.emergency_stop else '🟢 Normal'}",
@@ -1183,26 +1422,43 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if data == "ai_intel":
-        scores = []
+        global_data = context.application.bot_data.get("global_data", {})
+        market = global_data.get("market", {})
+        
+        txt = "🧠 **AI Analysis**\n\n"
         for coin in COINS:
-            sig = await get_signal(session, coin)
-            if sig:
-                scores.append(sig)
-        if scores:
-            txt = "🧠 **AI Analysis**\n\n"
-            for s in scores[:5]:
-                txt += f"{s['emoji']} **{s['symbol']}**\nScore: {s['score']}/100 | {s['bias']}\nRSI: {fmt(s.get('rsi'))}\n\n"
-            await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
-        else:
-            await q.edit_message_text("🧠 No data available.", reply_markup=back_kb())
+            p = market.get(coin, {}).get("price")
+            ind = market.get(coin, {}).get("indicators")
+            
+            txt += f"**{coin.upper()}**\n"
+            if p:
+                txt += f"💰 ${fmt(p['price'])} ({p.get('source', 'Unknown')})\n"
+                txt += f"📊 24h Change: {fmt(p.get('change', 0))}%\n"
+            if ind:
+                txt += f"📈 RSI: {fmt(ind.get('rsi'))}\n"
+                txt += f"📊 Vol Spike: {'Yes' if ind.get('vol_spike') else 'No'}\n"
+            txt += "\n"
+        
+        await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
         return
     
     if data == "sector_map":
-        await q.edit_message_text("🗺 **Sector Map**\n\nComing soon.", reply_markup=back_kb())
+        txt = "🗺 **Sector Map**\n\n"
+        for sector, coins in SECTOR_MAP.items():
+            txt += f"**{sector}**\n"
+            for c in coins:
+                p = await get_price(session, c.lower(), use_cache=True)
+                if p:
+                    txt += f"  {c}: ${fmt(p['price'])} ({p.get('source', 'Unknown')})\n"
+                else:
+                    txt += f"  {c}: No price\n"
+            txt += "\n"
+        
+        await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
         return
     
     if data == "liquidations":
-        await q.edit_message_text("🔥 **Liquidations**\n\nComing soon.", reply_markup=back_kb())
+        await q.edit_message_text("🔥 Liquidation data unavailable.\n\nCoinGlass integration coming soon.", reply_markup=back_kb())
         return
     
     if data == "scanner_on":
@@ -1220,10 +1476,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=back_kb()
         )
-        return
-    
-    if data == "portfolio":
-        await q.edit_message_text("📂 **Portfolio**\n\nComing soon.", reply_markup=back_kb())
         return
     
     if data == "settings":
@@ -1249,6 +1501,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # Settings submenus
     if data == "settings_risk":
         await q.edit_message_text(f"💰 **Risk**\n\nCurrent: {Config.RISK_PERCENT}%", parse_mode=ParseMode.MARKDOWN, reply_markup=risk_kb())
         return
