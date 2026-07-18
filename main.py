@@ -629,19 +629,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        await q.edit_message_text(f"⏳ Executing {sig['symbol']} {sig['bias']} on SoDEX...\nEntry: ${fmt(sig['entry'])} (mkt ${fmt(sig['price'])})\nQty: {sig['qty']:.6f} = ${notional:.2f}", reply_markup=back_kb())
+        # Send initial status message
+        await q.edit_message_text(
+            f"✅ Sending order to SoDEX...\nPlease wait...",
+            reply_markup=back_kb()
+        )
         
         try:
-            res = await sodex.place_order(
-                session=session,
-                symbol=sym.upper(),
-                bias=sig["bias"],
-                entry=float(sig["entry"]),
-                qty=float(sig["qty"])
+            res = await asyncio.wait_for(
+                sodex.place_order(
+                    session=session,
+                    symbol=sym.upper(),
+                    bias=sig["bias"],
+                    entry=float(sig["entry"]),
+                    qty=float(sig["qty"])
+                ),
+                timeout=20
             )
             
             if "err" in res:
-                await q.edit_message_text(f"❌ SoDEX rejected\n\n{res['err'][:1000]}", reply_markup=back_kb())
+                await context.bot.send_message(
+                    chat_id=q.message.chat.id,
+                    text=f"❌ SoDEX rejected\n\n{res['err'][:1000]}"
+                )
                 return
             
             analytics["live_trades"] += 1
@@ -684,12 +694,15 @@ Quantity:
 
 Confidence:
 {sig['confidence']}%
+
+Verification:
+Submitted
 """
             
-            # Simple verification
-            text += "\n\nVerification:\nSubmitted"
-            
-            await q.edit_message_text(text, reply_markup=back_kb())
+            await context.bot.send_message(
+                chat_id=q.message.chat.id,
+                text=text
+            )
             
             # Log execution
             log_execution({
@@ -704,8 +717,18 @@ Confidence:
                 "status": status
             })
             
+        except asyncio.TimeoutError:
+            await context.bot.send_message(
+                chat_id=q.message.chat.id,
+                text="❌ SoDEX request timed out."
+            )
+            return
         except Exception as e:
-            await q.edit_message_text(f"❌ SODEX Error: {str(e)[:500]}", reply_markup=back_kb())
+            await context.bot.send_message(
+                chat_id=q.message.chat.id,
+                text=f"❌ SODEX Error: {str(e)[:500]}"
+            )
+            return
     
     # ===== SECTORS =====
     elif data == "sectors":
