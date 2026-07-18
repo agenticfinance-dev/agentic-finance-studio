@@ -54,7 +54,6 @@ class Config:
     ]
 
 
-# Validate required environment variables
 missing = [name for name, value in Config.REQUIRED if not value]
 if missing:
     raise RuntimeError(f"Missing env vars: {', '.join(missing)}")
@@ -88,11 +87,10 @@ DB_PATH = "bot_database.db"
 TIMEOUT = ClientTimeout(total=20)
 
 # ============================================================================
-# IN-MEMORY CACHE (Faster than SQLite)
+# IN-MEMORY CACHE
 # ============================================================================
 
 class TTLCache:
-    """Thread-safe TTL cache with max size."""
     def __init__(self, maxsize=1000, ttl=300):
         self._cache = OrderedDict()
         self._maxsize = maxsize
@@ -117,22 +115,20 @@ class TTLCache:
             self._cache[key] = (value, time.monotonic())
             self._cache.move_to_end(key)
 
-# Global cache instance
 _cache = TTLCache(maxsize=1000, ttl=300)
 
-async def get_cached(key: str, max_age: int = 300):
+async def get_cached(key: str):
     """Get cached data from memory."""
     data = await _cache.get(key)
-    if data:
-        # Check if expired
-        if isinstance(data, dict) and "expires" in data:
-            if time.monotonic() > data["expires"]:
-                return None
-        return data
-    return None
+    if data and isinstance(data, dict) and "expires" in data:
+        if time.monotonic() > data["expires"]:
+            return None
+    return data
 
 async def set_cached(key: str, data, ttl: int = 300):
     """Cache data in memory with TTL."""
+    if data is None:
+        return
     data["expires"] = time.monotonic() + ttl
     await _cache.set(key, data)
 
@@ -162,23 +158,22 @@ class State:
     last_alert_time = {}
     sent_alerts = {}
     
-    # Shared database connection pool
     db_conn = None
-    db_lock = asyncio.Lock()
-    
-    # Order execution lock (prevents race conditions)
     order_lock = asyncio.Lock()
-    
-    # Signal cache (reuse signals for 60 seconds)
     signal_cache = {}
     signal_cache_time = {}
+    
+    # Background task references for cleanup
+    refresh_task = None
+    scanner_task = None
+    monitor_task = None
+    signer_task = None
 
 # ============================================================================
 # HELPERS
 # ============================================================================
 
 def fmt(p):
-    """Format a number for display."""
     if p is None:
         return "N/A"
     try:
@@ -192,11 +187,10 @@ def fmt(p):
     return f"{p:,.0f}"
 
 # ============================================================================
-# DATABASE (Connection Pool)
+# DATABASE
 # ============================================================================
 
 async def get_db_conn():
-    """Get shared database connection."""
     if State.db_conn is None:
         State.db_conn = await aiosqlite.connect(DB_PATH)
         State.db_conn.row_factory = aiosqlite.Row
@@ -204,7 +198,6 @@ async def get_db_conn():
 
 @asynccontextmanager
 async def get_db():
-    """Get database connection with auto-commit and rollback."""
     conn = await get_db_conn()
     try:
         yield conn
@@ -215,7 +208,6 @@ async def get_db():
         await conn.commit()
 
 async def init_db():
-    """Initialize database with tables and indexes."""
     conn = await get_db_conn()
     await conn.executescript("""
         PRAGMA journal_mode=WAL;
@@ -269,17 +261,14 @@ async def init_db():
     log.info("✅ Database ready")
 
 async def get_setting(key: str, default: str = None) -> str:
-    """Get a setting from the database."""
     async with get_db() as conn:
         row = await conn.execute("SELECT value FROM settings WHERE key = ?", (key,))
         r = await row.fetchone()
         return r["value"] if r else default
 
 async def set_setting(key: str, value: str) -> None:
-    """Set a setting in the database."""
     async with get_db() as conn:
         await conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-        # Also update memory for emergency stop
         if key == "emergency_stop":
             State.emergency_stop = value.lower() == "true"
 
@@ -288,7 +277,6 @@ async def set_setting(key: str, value: str) -> None:
 # ============================================================================
 
 def wilder_rsi(closes, period=14):
-    """Calculate Wilder's RSI (exponential smoothing)."""
     if not closes or len(closes) < period + 1:
         return None
     
@@ -310,7 +298,6 @@ def wilder_rsi(closes, period=14):
     return 100 - (100 / (1 + avg_gain / avg_loss))
 
 def ema(data, period):
-    """Calculate Exponential Moving Average."""
     if not data or len(data) < period:
         return None
     alpha = 2 / (period + 1)
@@ -320,7 +307,6 @@ def ema(data, period):
     return result
 
 def wilder_atr(highs, lows, closes, period=14):
-    """Calculate Wilder's ATR (exponential smoothing)."""
     if not closes or len(closes) < period + 1:
         return None
     
@@ -343,14 +329,12 @@ _coingecko_cache = None
 _coingecko_cache_time = 0
 
 async def safe_get(session, url, headers=None, retries=3):
-    """Make HTTP request with retry and rate limiting."""
     for attempt in range(retries):
         try:
             async with _semaphore:
                 async with session.get(url, headers=headers or {}, timeout=TIMEOUT) as r:
                     if r.status == 200:
                         return await r.json()
-                    # Retry on rate limit and server errors
                     if r.status in (429, 500, 502, 503, 504):
                         wait = (2 ** attempt) * (5 if r.status == 429 else 2)
                         log.warning(f"HTTP {r.status}, retrying in {wait}s")
@@ -366,7 +350,6 @@ async def safe_get(session, url, headers=None, retries=3):
     return None
 
 async def get_coingecko_batch(session):
-    """Fetch all coin prices in one request."""
     global _coingecko_cache, _coingecko_cache_time
     
     now = time.monotonic()
@@ -391,14 +374,12 @@ async def get_coingecko_batch(session):
 # ============================================================================
 
 async def get_price(session, symbol, use_cache=False):
-    """Get current price with fallbacks."""
     sym = symbol.upper()
     if use_cache:
         cached = await get_cached(f"price_{sym}")
-        if cached:
+        if cached and cached.get("price") is not None:
             return cached
     
-    # Try SoSoValue
     if Config.SOSO_API_KEY:
         try:
             async with _semaphore:
@@ -410,21 +391,21 @@ async def get_price(session, symbol, use_cache=False):
                 ) as r:
                     if r.status == 200:
                         data = await r.json()
-                        if data.get("code") == 0 and data.get("data"):
+                        if data and data.get("code") == 0 and data.get("data"):
                             d = data["data"]
-                            price = d.get("price") or d.get("last_price")
-                            if price:
-                                result = {
-                                    "price": float(price),
-                                    "change": float(d.get("change_24h", 0) or 0),
-                                    "source": "SoSoValue"
-                                }
-                                await set_cached(f"price_{sym}", result, 60)
-                                return result
+                            if d:
+                                price = d.get("price") or d.get("last_price")
+                                if price:
+                                    result = {
+                                        "price": float(price),
+                                        "change": float(d.get("change_24h", 0) or 0),
+                                        "source": "SoSoValue"
+                                    }
+                                    await set_cached(f"price_{sym}", result, 60)
+                                    return result
         except Exception as e:
             log.debug(f"SoSoValue price failed: {e}")
     
-    # Try CoinGecko (batch request)
     try:
         data = await get_coingecko_batch(session)
         if data:
@@ -440,7 +421,6 @@ async def get_price(session, symbol, use_cache=False):
     except Exception as e:
         log.debug(f"CoinGecko price failed: {e}")
     
-    # Try Binance
     try:
         data = await safe_get(session, f"https://api.binance.com/api/v3/ticker/24hr?symbol={sym}USDT")
         if data and data.get("lastPrice"):
@@ -454,10 +434,10 @@ async def get_price(session, symbol, use_cache=False):
     except Exception as e:
         log.debug(f"Binance price failed: {e}")
     
-    return await get_cached(f"price_{sym}")
+    # Don't cache None responses
+    return None
 
 async def get_indicators(session, symbol, use_cache=False):
-    """Get technical indicators."""
     sym = symbol.upper()
     if use_cache:
         cached = await get_cached(f"indicators_{sym}")
@@ -510,7 +490,6 @@ log.info(f"SoDEX ready: {sodex.ready}")
 # ============================================================================
 
 async def check_signer(session):
-    """Check if the signer service is online."""
     try:
         async with session.get(f"{Config.SIGNER_URL}/health", timeout=5) as r:
             State.signer_ready = r.status == 200
@@ -520,7 +499,6 @@ async def check_signer(session):
         log.warning(f"⚠️ Signer unreachable: {e}")
 
 async def execute_order(session, symbol, bias, entry, qty, sl, tp):
-    """Execute an order via the signer service with race protection."""
     async with State.order_lock:
         if not State.signer_ready:
             return {"ok": False, "error": "Signer offline"}
@@ -570,11 +548,10 @@ async def execute_order(session, symbol, bias, entry, qty, sl, tp):
         return {"ok": False, "error": "Max retries exceeded"}
 
 # ============================================================================
-# POSITIONS (with transactions)
+# POSITIONS
 # ============================================================================
 
 async def open_position_full(symbol, bias, entry, qty, sl, tp, order_id=None, tx_hash=None, fill_price=None, fees=0):
-    """Open a position with full details."""
     async with get_db() as conn:
         trail = entry
         partial1 = entry + (tp - entry) * 0.4 if bias == "LONG" else entry - (entry - tp) * 0.4
@@ -593,7 +570,6 @@ async def open_position_full(symbol, bias, entry, qty, sl, tp, order_id=None, tx
         return cursor.lastrowid
 
 async def has_open_position(symbol):
-    """Check if ANY position is open for this symbol."""
     async with get_db() as conn:
         row = await conn.execute(
             "SELECT COUNT(*) FROM positions WHERE symbol = ? AND status='open'",
@@ -602,9 +578,7 @@ async def has_open_position(symbol):
         return (await row.fetchone())[0] > 0
 
 async def close_position(pos_id, exit_price, reason=""):
-    """Close a position and record the trade (atomic transaction)."""
     async with get_db() as conn:
-        # Use transaction for consistency
         await conn.execute("BEGIN IMMEDIATE")
         
         row = await conn.execute(
@@ -643,7 +617,6 @@ async def close_position(pos_id, exit_price, reason=""):
         return {"pnl": pnl, "pnl_percent": pnl_pct}
 
 async def get_open_positions():
-    """Get all open positions."""
     async with get_db() as conn:
         rows = await conn.execute(
             "SELECT symbol, bias, entry, qty, original_qty, tp, sl FROM positions WHERE status='open'"
@@ -651,13 +624,11 @@ async def get_open_positions():
         return await rows.fetchall()
 
 async def get_open_positions_count():
-    """Get count of open positions."""
     async with get_db() as conn:
         row = await conn.execute("SELECT COUNT(*) FROM positions WHERE status='open'")
         return (await row.fetchone())[0]
 
 async def get_daily_pnl():
-    """Get today's realized PnL."""
     today = datetime.now().date().isoformat()
     async with get_db() as conn:
         row = await conn.execute("SELECT SUM(pnl) FROM trades WHERE date(closed_at) = ?", (today,))
@@ -668,7 +639,6 @@ async def get_daily_pnl():
 # ============================================================================
 
 async def get_funding_rates(session):
-    """Get funding rates from Binance."""
     cached = await get_cached("funding")
     if cached:
         return cached
@@ -694,7 +664,6 @@ async def get_funding_rates(session):
     return []
 
 async def get_etf_flows(session):
-    """Get ETF flows from SoSoValue."""
     cached = await get_cached("etf")
     if cached:
         return cached
@@ -704,14 +673,14 @@ async def get_etf_flows(session):
             data = await safe_get(session, f"{Config.SOSO_BASE}/etf/flows", headers=SOSO_HEADERS)
             if data and data.get("code") == 0:
                 etf_data = data.get("data", {})
-                await set_cached("etf", etf_data, 60)
-                return etf_data
+                if etf_data:
+                    await set_cached("etf", etf_data, 60)
+                    return etf_data
         except Exception:
             pass
     return {}
 
 async def get_whale_data(session):
-    """Get whale activity data."""
     cached = await get_cached("whales")
     if cached:
         return cached
@@ -721,8 +690,9 @@ async def get_whale_data(session):
             data = await safe_get(session, f"{Config.SOSO_BASE}/market/whale", headers=SOSO_HEADERS)
             if data and data.get("code") == 0:
                 whale_data = data.get("data", [])
-                await set_cached("whales", whale_data, 60)
-                return whale_data
+                if whale_data:
+                    await set_cached("whales", whale_data, 60)
+                    return whale_data
         except Exception:
             pass
     return []
@@ -732,7 +702,6 @@ async def get_whale_data(session):
 # ============================================================================
 
 def calc_position_size(entry, sl, account=Config.ACCOUNT_SIZE, risk=Config.RISK_PERCENT):
-    """Calculate position size with risk management."""
     if entry is None or sl is None or entry == sl:
         return None
     risk_amount = account * (risk / 100)
@@ -747,14 +716,11 @@ def calc_position_size(entry, sl, account=Config.ACCOUNT_SIZE, risk=Config.RISK_
     return round(qty / step) * step
 
 async def get_signal(session, symbol, global_data=None, use_cache=False, price=None, indicators=None):
-    """Generate a trading signal with detailed logging."""
-    # Check signal cache
     cache_key = f"{symbol}_{int(time.monotonic() / 60)}"
     if use_cache and cache_key in State.signal_cache:
         return State.signal_cache[cache_key]
     
     try:
-        # Use provided price/indicators or fetch them
         if price is None or indicators is None:
             price, indicators = await asyncio.gather(
                 get_price(session, symbol, use_cache),
@@ -852,7 +818,6 @@ async def get_signal(session, symbol, global_data=None, use_cache=False, price=N
         
         score = max(0, min(100, round(score)))
         
-        # Determine bias
         if score >= 65:
             bias, action, emoji = "LONG", "Accumulate", "🟢"
             entry = price["price"] * 0.992
@@ -898,9 +863,9 @@ async def get_signal(session, symbol, global_data=None, use_cache=False, price=N
             "source": price.get("source", "Unknown")
         }
         
-        # Cache signal for 60 seconds
         if use_cache:
             State.signal_cache[cache_key] = result
+            State.signal_cache_time[cache_key] = time.monotonic()
         
         return result
     except Exception as e:
@@ -913,7 +878,6 @@ async def get_signal(session, symbol, global_data=None, use_cache=False, price=N
 # ============================================================================
 
 async def manage_positions(session, app):
-    """Monitor and manage open positions."""
     async with get_db() as conn:
         rows = await conn.execute("SELECT * FROM positions WHERE status='open'")
         positions = await rows.fetchall()
@@ -921,7 +885,6 @@ async def manage_positions(session, app):
         if not positions:
             return
         
-        # Fetch all prices in parallel
         prices = await asyncio.gather(
             *[get_price(session, p["symbol"].lower()) for p in positions]
         )
@@ -941,12 +904,10 @@ async def manage_positions(session, app):
             original_qty = pos["original_qty"]
             
             if pos["bias"] == "LONG":
-                # Trailing stop
                 if current - entry >= (entry - sl) and sl < entry:
                     await conn.execute("UPDATE positions SET sl = ? WHERE id = ?", (entry, pos["id"]))
                     log.info(f"📊 Trailing stop: {pos['symbol']} -> breakeven")
                 
-                # Partial TP1 (40% of original) - only once
                 if current >= p1 and not tp1_done and pos["qty"] > 0.001:
                     qty_close = original_qty * 0.4
                     qty_remaining = max(0, pos["qty"] - qty_close)
@@ -956,7 +917,6 @@ async def manage_positions(session, app):
                     )
                     log.info(f"📊 TP1: {pos['symbol']} at ${p1:.2f}")
                 
-                # Partial TP2 (30% of original) - only once
                 if current >= p2 and not tp2_done and pos["qty"] > 0.001:
                     qty_close = original_qty * 0.3
                     qty_remaining = max(0, pos["qty"] - qty_close)
@@ -966,27 +926,23 @@ async def manage_positions(session, app):
                     )
                     log.info(f"📊 TP2: {pos['symbol']} at ${p2:.2f}")
                 
-                # Full TP (remaining)
                 if current >= tp and pos["qty"] > 0.001:
                     await close_position(pos["id"], tp, "TP Hit")
                     log.info(f"✅ {pos['symbol']} TP hit")
                     await send_telegram_message(app, f"✅ {pos['symbol']} TP hit at ${tp:.2f}")
                     continue
                 
-                # SL
                 if current <= sl:
                     await close_position(pos["id"], sl, "SL Hit")
                     log.info(f"❌ {pos['symbol']} SL hit")
                     await send_telegram_message(app, f"❌ {pos['symbol']} SL hit at ${sl:.2f}")
                     continue
             
-            else:  # SHORT
-                # Trailing stop
+            else:
                 if entry - current >= (entry - sl) and sl > entry:
                     await conn.execute("UPDATE positions SET sl = ? WHERE id = ?", (entry, pos["id"]))
                     log.info(f"📊 Trailing stop: {pos['symbol']} -> breakeven")
                 
-                # Partial TP1 (40% of original) - only once
                 if current <= p1 and not tp1_done and pos["qty"] > 0.001:
                     qty_close = original_qty * 0.4
                     qty_remaining = max(0, pos["qty"] - qty_close)
@@ -996,7 +952,6 @@ async def manage_positions(session, app):
                     )
                     log.info(f"📊 TP1: {pos['symbol']} at ${p1:.2f}")
                 
-                # Partial TP2 (30% of original) - only once
                 if current <= p2 and not tp2_done and pos["qty"] > 0.001:
                     qty_close = original_qty * 0.3
                     qty_remaining = max(0, pos["qty"] - qty_close)
@@ -1006,14 +961,12 @@ async def manage_positions(session, app):
                     )
                     log.info(f"📊 TP2: {pos['symbol']} at ${p2:.2f}")
                 
-                # Full TP (remaining)
                 if current <= tp and pos["qty"] > 0.001:
                     await close_position(pos["id"], tp, "TP Hit")
                     log.info(f"✅ {pos['symbol']} TP hit")
                     await send_telegram_message(app, f"✅ {pos['symbol']} TP hit at ${tp:.2f}")
                     continue
                 
-                # SL
                 if current >= sl:
                     await close_position(pos["id"], sl, "SL Hit")
                     log.info(f"❌ {pos['symbol']} SL hit")
@@ -1021,7 +974,6 @@ async def manage_positions(session, app):
                     continue
 
 async def send_telegram_message(app, text):
-    """Send Telegram message with retry."""
     if not Config.ALERT_CHAT_ID:
         return
     try:
@@ -1034,7 +986,6 @@ async def send_telegram_message(app, text):
 # ============================================================================
 
 async def refresh_data(app):
-    """Refresh global market data in background."""
     session = app.bot_data["session"]
     while True:
         try:
@@ -1049,7 +1000,6 @@ async def refresh_data(app):
             
             global_data = {"funding": funding, "whales": whales, "etf": etf}
             
-            # Fetch all coin data in parallel
             tasks = []
             for coin in COINS:
                 tasks.append(get_price(session, coin, use_cache=True))
@@ -1063,7 +1013,6 @@ async def refresh_data(app):
                     "indicators": results[i * 2 + 1]
                 }
             
-            # Generate signals in parallel
             signals = await asyncio.gather(*[
                 get_signal(session, coin, global_data, use_cache=True, 
                           price=market[coin]["price"], 
@@ -1093,7 +1042,6 @@ async def refresh_data(app):
         await asyncio.sleep(300)
 
 async def scanner_loop(app):
-    """Main scanner loop for signal generation and auto-execution."""
     await asyncio.sleep(10)
     session = app.bot_data["session"]
     
@@ -1105,15 +1053,12 @@ async def scanner_loop(app):
             
             scan_start = time.monotonic()
             
-            # Check emergency stop (sync from database)
             State.emergency_stop = (await get_setting("emergency_stop", "false")) == "true"
             
-            # Check signer
             if not State.signer_ready or not sodex.ready:
                 await asyncio.sleep(60)
                 continue
             
-            # Check daily loss
             daily_loss = await get_daily_pnl()
             if daily_loss < -Config.ACCOUNT_SIZE * (Config.MAX_DAILY_LOSS / 100):
                 if not State.emergency_stop:
@@ -1124,7 +1069,6 @@ async def scanner_loop(app):
                 await asyncio.sleep(Config.SCAN_INTERVAL)
                 continue
             
-            # Check max positions
             if await get_open_positions_count() >= Config.MAX_POSITIONS:
                 await asyncio.sleep(Config.SCAN_INTERVAL)
                 continue
@@ -1132,7 +1076,6 @@ async def scanner_loop(app):
             global_data = app.bot_data.get("global_data", {})
             State.analytics["auto_scans"] += 1
             
-            # Scan all coins in parallel
             signals = await asyncio.gather(*[
                 get_signal(session, coin, global_data, use_cache=True)
                 for coin in COINS
@@ -1146,7 +1089,6 @@ async def scanner_loop(app):
                 State.daily_alerts += 1
                 State.last_alert_sent = datetime.now()
                 
-                # Send summary
                 if Config.ALERT_CHAT_ID:
                     summary = "🤖 **AGENTIC ALERT**\n\n"
                     for s in sorted(valid, key=lambda x: x["confidence"], reverse=True)[:5]:
@@ -1166,7 +1108,6 @@ async def scanner_loop(app):
                     except Exception as e:
                         log.warning(f"Failed to send alert: {e}")
                 
-                # Auto-execute best signal
                 top = valid[0]
                 log.info(f"🎯 Top signal: {top['symbol']} {top['score']} {top['confidence']}%")
                 
@@ -1191,7 +1132,6 @@ async def scanner_loop(app):
             State.avg_scan_duration = State.avg_scan_duration * 0.9 + elapsed * 0.1
             State.scanner_alive = True
             
-            # Schedule next scan accounting for elapsed time
             sleep_time = max(0, Config.SCAN_INTERVAL - elapsed)
             await asyncio.sleep(sleep_time)
             
@@ -1205,7 +1145,6 @@ async def scanner_loop(app):
 # ============================================================================
 
 def main_menu():
-    """Main menu keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Dashboard", callback_data="dashboard")],
         [InlineKeyboardButton("⚡ Execute", callback_data="execute_menu"), InlineKeyboardButton("📂 Portfolio", callback_data="portfolio")],
@@ -1217,7 +1156,6 @@ def main_menu():
     ])
 
 def execute_menu():
-    """Execute menu keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{COIN_SYMBOLS['btc']} BTC", callback_data="exec_btc"),
          InlineKeyboardButton(f"{COIN_SYMBOLS['eth']} ETH", callback_data="exec_eth")],
@@ -1228,11 +1166,9 @@ def execute_menu():
     ])
 
 def back_kb():
-    """Back button keyboard."""
     return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="back_main")]])
 
 def risk_kb():
-    """Risk settings keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("1%", callback_data="risk_1"), InlineKeyboardButton("2%", callback_data="risk_2"),
          InlineKeyboardButton("3%", callback_data="risk_3"), InlineKeyboardButton("5%", callback_data="risk_5")],
@@ -1240,7 +1176,6 @@ def risk_kb():
     ])
 
 def interval_kb():
-    """Interval settings keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("5m", callback_data="interval_300"), InlineKeyboardButton("10m", callback_data="interval_600"),
          InlineKeyboardButton("15m", callback_data="interval_900"), InlineKeyboardButton("30m", callback_data="interval_1800")],
@@ -1248,7 +1183,6 @@ def interval_kb():
     ])
 
 def confidence_kb():
-    """Confidence settings keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("60%", callback_data="conf_60"), InlineKeyboardButton("65%", callback_data="conf_65"),
          InlineKeyboardButton("70%", callback_data="conf_70"), InlineKeyboardButton("75%", callback_data="conf_75")],
@@ -1256,7 +1190,6 @@ def confidence_kb():
     ])
 
 def maxpos_kb():
-    """Max positions settings keyboard."""
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("1", callback_data="maxpos_1"), InlineKeyboardButton("2", callback_data="maxpos_2"),
          InlineKeyboardButton("3", callback_data="maxpos_3"), InlineKeyboardButton("5", callback_data="maxpos_5")],
@@ -1264,7 +1197,6 @@ def maxpos_kb():
     ])
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command."""
     await update.message.reply_text(
         "🚀 **Agentic Finance**\n\nInstitutional-grade trading intelligence.",
         parse_mode=ParseMode.MARKDOWN,
@@ -1276,7 +1208,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle all callback queries."""
     q = update.callback_query
     await q.answer()
     session = context.application.bot_data["session"]
@@ -1286,7 +1217,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🚀 **Agentic Finance**", parse_mode=ParseMode.MARKDOWN, reply_markup=main_menu())
         return
     
-    # Dashboard
     if data == "dashboard":
         global_data = context.application.bot_data.get("global_data", {})
         market = global_data.get("market", {})
@@ -1318,7 +1248,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
         return
     
-    # Execute
     if data == "execute_menu":
         await q.edit_message_text("⚡ **Select Asset**", parse_mode=ParseMode.MARKDOWN, reply_markup=execute_menu())
         return
@@ -1362,7 +1291,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
         return
     
-    # Portfolio
     if data == "portfolio":
         positions = await get_open_positions()
         if not positions:
@@ -1381,7 +1309,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=back_kb())
         return
     
-    # Stats
     if data == "stats":
         await q.edit_message_text(
             f"📊 **Stats**\n\n"
@@ -1399,7 +1326,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Quick data views
     if data == "whales":
         whales = await get_whale_data(session)
         txt = "🐳 **Whales**\n\n" + "\n".join([f"• {w.get('symbol', 'Unknown')}: ${w.get('amount', 0):,.0f}" for w in whales[:5]]) if whales else "🐳 No whale activity."
@@ -1458,7 +1384,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if data == "liquidations":
-        await q.edit_message_text("🔥 Liquidation data unavailable.\n\nCoinGlass integration coming soon.", reply_markup=back_kb())
+        await q.edit_message_text("🔥 Liquidation data unavailable.", reply_markup=back_kb())
         return
     
     if data == "scanner_on":
@@ -1501,7 +1427,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Settings submenus
     if data == "settings_risk":
         await q.edit_message_text(f"💰 **Risk**\n\nCurrent: {Config.RISK_PERCENT}%", parse_mode=ParseMode.MARKDOWN, reply_markup=risk_kb())
         return
@@ -1539,7 +1464,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Settings actions
     if data.startswith("risk_"):
         Config.RISK_PERCENT = float(data.split("_")[1])
         await set_setting("risk_percent", str(Config.RISK_PERCENT))
@@ -1586,7 +1510,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================================
 
 async def health(request):
-    """Health check endpoint."""
     if request.path == "/health":
         return web.json_response({"status": "ok"})
     
@@ -1614,13 +1537,10 @@ async def health(request):
 # ============================================================================
 
 async def main():
-    """Main entry point."""
     log.info("🚀 Starting Agentic Finance...")
     
-    # Initialize database FIRST
     await init_db()
     
-    # Load settings from database
     Config.RISK_PERCENT = float(await get_setting("risk_percent", str(Config.RISK_PERCENT)))
     Config.SCAN_INTERVAL = int(await get_setting("scan_interval", str(Config.SCAN_INTERVAL)))
     Config.MIN_CONFIDENCE = int(await get_setting("min_confidence", str(Config.MIN_CONFIDENCE)))
@@ -1628,7 +1548,6 @@ async def main():
     Config.MAX_POSITIONS = int(await get_setting("max_positions", str(Config.MAX_POSITIONS)))
     State.emergency_stop = (await get_setting("emergency_stop", "false")) == "true"
     
-    # Web server
     app = web.Application()
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
@@ -1637,10 +1556,8 @@ async def main():
     await web.TCPSite(runner, "0.0.0.0", Config.PORT).start()
     log.info(f"✅ Web server on port {Config.PORT}")
     
-    # HTTP session
     session = ClientSession(timeout=TIMEOUT)
     
-    # Load symbols
     try:
         await load_symbols(session)
         log.info(f"✅ Loaded {len(SYMBOL_IDS)} symbols")
@@ -1649,10 +1566,8 @@ async def main():
         await session.close()
         raise
     
-    # Check signer
     await check_signer(session)
     
-    # Telegram app
     bot = ApplicationBuilder().token(Config.TOKEN).build()
     bot.bot_data["session"] = session
     bot.bot_data["global_data"] = {}
@@ -1664,11 +1579,11 @@ async def main():
     await bot.start()
     await bot.bot.delete_webhook(drop_pending_updates=True)
     
-    # Background tasks
-    refresh_task = asyncio.create_task(refresh_data(bot))
-    scanner_task = asyncio.create_task(scanner_loop(bot))
-    monitor_task = asyncio.create_task(manage_positions_loop(bot))
-    signer_task = asyncio.create_task(signer_health_loop(bot))
+    # Start background tasks and store references for cleanup
+    State.refresh_task = asyncio.create_task(refresh_data(bot))
+    State.scanner_task = asyncio.create_task(scanner_loop(bot))
+    State.monitor_task = asyncio.create_task(manage_positions_loop(bot))
+    State.signer_task = asyncio.create_task(signer_health_loop(bot))
     
     log.info("✅ Bot ready")
     
@@ -1678,12 +1593,14 @@ async def main():
     except KeyboardInterrupt:
         log.info("Shutting down...")
     finally:
-        for task in [refresh_task, scanner_task, monitor_task, signer_task]:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+        # Cancel all background tasks
+        for task in [State.refresh_task, State.scanner_task, State.monitor_task, State.signer_task]:
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
         
         await bot.updater.stop()
         await bot.stop()
@@ -1694,7 +1611,6 @@ async def main():
     log.info("✅ Shutdown complete")
 
 async def manage_positions_loop(bot):
-    """Background loop for position management."""
     session = bot.bot_data["session"]
     while True:
         try:
@@ -1704,7 +1620,6 @@ async def manage_positions_loop(bot):
         await asyncio.sleep(15)
 
 async def signer_health_loop(bot):
-    """Background loop for signer health checks."""
     session = bot.bot_data["session"]
     while True:
         try:
@@ -1721,7 +1636,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        log.info("Bot stopped")
-    except Exception as e:
-        log.error(f"Fatal: {e}")
-        raise
+        log.info("Bot stopped
