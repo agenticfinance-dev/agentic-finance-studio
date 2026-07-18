@@ -29,7 +29,7 @@ SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "300"))
 ACCOUNT_SIZE = float(os.getenv("ACCOUNT_SIZE", "1000"))
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "1.5"))
 MIN_CONFIDENCE = int(os.getenv("MIN_CONFIDENCE", "65"))
-ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true"
+ENABLE_AUTO_ALERTS = os.getenv("ENABLE_AUTO_ALERTS", "true").lower() == "true")
 
 analytics = {"soso_calls": 0, "live_trades": 0, "signals": 2551, "alerts": 151, "auto_scans": 0}
 start_time = datetime.now()
@@ -39,19 +39,21 @@ telegram_connected = True
 last_scan_time = None
 avg_scan_duration = 0
 last_api_error = None
+last_market_summary = {}  # FIX 1: Store last summary to avoid duplicate alerts
+sent_alerts = {}  # FIX 2: Track sent alerts per asset
 
 COIN_NAMES = {"btc":"bitcoin","eth":"ethereum","bnb":"binancecoin","xrp":"ripple","sol":"solana"}
 ALL_COINS = ["btc","eth","bnb","xrp","sol"]
 
 # ==================== SEMAPHORES FOR RATE LIMITING ====================
-http_semaphore = asyncio.Semaphore(5)  # FIX 6: Rate limiting
+http_semaphore = asyncio.Semaphore(5)
+telegram_semaphore = asyncio.Semaphore(3)  # FIX 4: Limit concurrent Telegram messages
 
 # ==================== ASYNC DATABASE ====================
 DB_PATH = "bot_database.db"
 
 async def init_database():
     async with aiosqlite.connect(DB_PATH) as db:
-        # FIX 2: Enable WAL mode for better concurrency
         await db.execute("PRAGMA journal_mode=WAL;")
         await db.execute("PRAGMA synchronous=NORMAL;")
         await db.execute("PRAGMA foreign_keys=ON;")
@@ -121,10 +123,9 @@ async def get_db():
 
 # ==================== SAFE HTTP WITH RETRY ====================
 async def safe_get(session, url, headers=None, retries=3):
-    """FIX 7: HTTP with retry and exponential backoff"""
     for attempt in range(retries):
         try:
-            async with http_semaphore:  # FIX 6: Rate limiting
+            async with http_semaphore:
                 async with session.get(url, headers=headers or {}, timeout=TIMEOUT) as r:
                     if r.status == 200:
                         return await r.json()
@@ -264,9 +265,8 @@ async def get_indicators(session, symbol):
 sodex = SoDEXExecutor(SODEX_API_KEY_NAME, SODEX_API_PRIVATE_KEY, SODEX_ACCOUNT_ID)
 logging.info(f"SoDEX Config: key={bool(SODEX_API_KEY_NAME)}, private={bool(SODEX_API_PRIVATE_KEY)}, account={SODEX_ACCOUNT_ID}, ready={sodex.ready}")
 
-# ==================== GLOBAL DATA FETCH (PARALLEL) ====================
+# ==================== GLOBAL DATA FETCH ====================
 async def fetch_global_data(session):
-    """FIX 3: Fetch all global data in parallel"""
     try:
         funding, whales, sector, etf = await asyncio.gather(
             get_funding_rates(session),
@@ -446,50 +446,22 @@ async def get_sector_data(session):
             sectors[k] = sectors[k] / 3
     return sectors
 
-# ==================== AI SCORING ENGINE (ADAPTIVE) ====================
+# ==================== AI SCORING ENGINE ====================
 async def get_adaptive_weights(session):
-    """FIX 10: Adaptive weights based on market conditions"""
-    # Get volatility from BTC
     btc = await get_price(session, "btc")
     if not btc or not btc["price"]:
         return {"trend": 35, "liquidity": 20, "funding": 10, "volume": 10, "whales": 10, "etf": 10, "rsi": 5}
     
     volatility = abs(btc["change"])
     
-    if volatility > 5:  # High volatility
-        return {
-            "trend": 20,
-            "liquidity": 30,
-            "funding": 15,
-            "volume": 15,
-            "whales": 10,
-            "etf": 5,
-            "rsi": 5
-        }
-    elif volatility < 2:  # Low volatility
-        return {
-            "trend": 40,
-            "liquidity": 10,
-            "funding": 10,
-            "volume": 5,
-            "whales": 10,
-            "etf": 15,
-            "rsi": 10
-        }
-    else:  # Normal
-        return {
-            "trend": 35,
-            "liquidity": 20,
-            "funding": 10,
-            "volume": 10,
-            "whales": 10,
-            "etf": 10,
-            "rsi": 5
-        }
+    if volatility > 5:
+        return {"trend": 20, "liquidity": 30, "funding": 15, "volume": 15, "whales": 10, "etf": 5, "rsi": 5}
+    elif volatility < 2:
+        return {"trend": 40, "liquidity": 10, "funding": 10, "volume": 5, "whales": 10, "etf": 15, "rsi": 10}
+    else:
+        return {"trend": 35, "liquidity": 20, "funding": 10, "volume": 10, "whales": 10, "etf": 10, "rsi": 5}
 
 async def get_market_score(session, symbol, global_data=None):
-    """Generate adaptive score based on market conditions"""
-    # FIX 4: Parallel price + indicators
     price, ind = await asyncio.gather(
         get_price(session, symbol),
         get_indicators(session, symbol)
@@ -506,7 +478,6 @@ async def get_market_score(session, symbol, global_data=None):
     sectors = global_data.get("sector", {}) if global_data else {}
     etf = global_data.get("etf", {}) if global_data else {}
     
-    # Get adaptive weights
     weights = await get_adaptive_weights(session)
     
     score = 50
@@ -694,7 +665,9 @@ async def check_positions(session, app):
                     )
                     if ALERT_CHAT_ID:
                         try:
-                            await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=msg)
+                            async with telegram_semaphore:
+                                await asyncio.sleep(0.3)  # FIX 4: Rate limit
+                                await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=msg)
                         except Exception as e:
                             logging.warning(f"Failed to send close alert: {e}")
 
@@ -842,7 +815,7 @@ async def get_open_positions_count():
 
 async def get_database_size():
     try:
-        return os.path.getsize(DB_PATH) // 1024  # KB
+        return os.path.getsize(DB_PATH) // 1024
     except:
         return 0
 
@@ -854,7 +827,6 @@ async def get_cache_size():
 
 # ==================== GLOBAL DATA REFRESH ====================
 async def refresh_global_data(app):
-    """Background task to refresh global data periodically"""
     session = app.bot_data.get("session")
     
     while True:
@@ -885,7 +857,6 @@ async def refresh_global_data(app):
             await asyncio.sleep(60)
 
 async def get_global_data(app):
-    """Get cached global data from app.bot_data"""
     global_data = app.bot_data.get("global_data")
     
     if not global_data:
@@ -894,9 +865,9 @@ async def get_global_data(app):
     
     return global_data
 
-# ==================== AUTONOMOUS SCANNER ====================
+# ==================== AUTONOMOUS SCANNER (FIXES 1, 2, 3, 4) ====================
 async def autonomous_scanner(app):
-    global scanner_alive, telegram_connected, last_scan_time, avg_scan_duration
+    global scanner_alive, telegram_connected, last_scan_time, avg_scan_duration, last_market_summary
     logging.info(f"🤖 Autonomous scanner started - interval {SCAN_INTERVAL}s, min confidence {MIN_CONFIDENCE}%")
     await asyncio.sleep(10)
     session = app.bot_data.get("session")
@@ -919,14 +890,60 @@ async def autonomous_scanner(app):
             analytics["auto_scans"] += 1
             logging.info(f"🔍 [AutoScan #{analytics['auto_scans']}] Scanning {len(ALL_COINS)} coins...")
             
-            # FIX 12: Parallel scanning
+            # Scan all coins in parallel
             scan_tasks = []
             for coin in ALL_COINS:
                 scan_tasks.append(scan_coin(session, coin, global_data, app))
             
             results = await asyncio.gather(*scan_tasks)
             
-            alerts_sent = sum(1 for r in results if r)
+            # FIX 1: Combine all new signals into ONE message instead of multiple
+            new_signals = [r for r in results if r and r.get('new_alert')]
+            alerts_sent = 0
+            
+            if new_signals:
+                # Build combined market summary
+                summary = "🤖 **AGENTIC MARKET SUMMARY**\n\n"
+                summary += f"📊 {len(new_signals)} new signals detected\n\n"
+                
+                for signal in new_signals:
+                    sig = signal['signal']
+                    summary += f"**{sig['symbol']} {sig['bias']}** | {sig['confidence']}%\n"
+                    summary += f"💰 ${fmt(sig['price'])} ({sig['change']:+.1f}%)\n"
+                    summary += f"Entry: ${fmt(sig['entry'])} | TP: ${fmt(sig['tp'])} | SL: ${fmt(sig['sl'])}\n"
+                    summary += f"RR: {sig['rr']} | RSI: {sig['rsi']}\n\n"
+                
+                summary += f"⚡ Auto-detected by Agentic Finance"
+                
+                # Send ONE combined message
+                if ALERT_CHAT_ID:
+                    try:
+                        async with telegram_semaphore:  # FIX 4: Rate limit
+                            await asyncio.sleep(0.3)
+                            kb = InlineKeyboardMarkup([
+                                [InlineKeyboardButton("📊 View All Signals", callback_data="market_pulse")],
+                                [InlineKeyboardButton("⚡ Execute", callback_data="exec_btc")]
+                            ])
+                            await app.bot.send_message(
+                                chat_id=ALERT_CHAT_ID,
+                                text=summary,
+                                parse_mode="Markdown",
+                                reply_markup=kb
+                            )
+                            alerts_sent = len(new_signals)
+                            analytics["alerts"] += alerts_sent
+                            logging.info(f"✅ Combined summary sent with {alerts_sent} alerts")
+                    except Exception as e:
+                        telegram_connected = False
+                        logging.warning(f"Failed to send combined alert: {e}")
+                else:
+                    logging.info(f"🔔 [AUTO-ALERT] {len(new_signals)} signals detected - ALERT_CHAT_ID not set")
+                    alerts_sent = len(new_signals)
+                    analytics["alerts"] += alerts_sent
+                
+                # Store last summary for comparison
+                last_market_summary = {s['signal']['symbol']: s['signal']['confidence'] for s in new_signals}
+            
             scanner_alive = True
             
             scan_duration = (datetime.now() - scan_start).total_seconds()
@@ -942,8 +959,11 @@ async def autonomous_scanner(app):
         await asyncio.sleep(SCAN_INTERVAL)
 
 async def scan_coin(session, coin, global_data, app):
-    """FIX 8: Skip if data hasn't changed"""
+    """FIX 3: Log asset loading for debugging"""
     try:
+        # Log asset info (FIX 3)
+        logging.debug(f"Scanning asset: {coin}")
+        
         # Check if already have a position
         async with get_db() as conn:
             cursor = await conn.execute('SELECT COUNT(*) FROM positions WHERE symbol = ? AND status = "open"', (coin.upper(),))
@@ -951,7 +971,7 @@ async def scan_coin(session, coin, global_data, app):
             if count > 0:
                 return None
         
-        # FIX 5: Clean old alert timestamps
+        # Clean old alert timestamps
         await clean_old_alerts()
         
         now = datetime.now().timestamp()
@@ -963,35 +983,19 @@ async def scan_coin(session, coin, global_data, app):
         if not sig:
             return None
         
+        # FIX 2: Only send alert if confidence increased significantly
+        last_conf = sent_alerts.get(coin, 0)
         if sig["confidence"] >= MIN_CONFIDENCE and sig["bias"] != "NEUTRAL":
-            last_alert_time[coin] = now
-            analytics["alerts"] += 1
-            
-            alert_text = (
-                f"🤖 AGENTIC ALERT - {sig['symbol']} {sig['bias']} {sig['confidence']}%\n\n"
-                f"💰 ${fmt(sig['price'])} ({sig['change']:+.1f}%)\n"
-                f"Entry: ${fmt(sig['entry'])} | TP: ${fmt(sig['tp'])} | SL: ${fmt(sig['sl'])}\n"
-                f"RR: {sig['rr']} | RSI: {sig['rsi']} | Qty: {sig['qty']:.4f}\n\n"
-                + "\n".join(sig['checks']) + "\n\n"
-                f"⚡ Auto-detected by Agentic Finance"
-            )
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"⚡ EXECUTE {sig['symbol']}", callback_data=f"exec_{coin}")],
-                [InlineKeyboardButton("📊 View Details", callback_data=f"signal_{coin}")]
-            ])
-            
-            if ALERT_CHAT_ID:
-                try:
-                    await app.bot.send_message(chat_id=ALERT_CHAT_ID, text=alert_text, reply_markup=kb)
-                    logging.info(f"✅ Auto-alert sent for {coin} {sig['bias']} {sig['confidence']}%")
-                    return True
-                except Exception as e:
-                    telegram_connected = False
-                    logging.warning(f"Failed to send auto-alert: {e}")
-                    return None
-            else:
-                logging.info(f"🔔 [AUTO-ALERT] {coin} {sig['bias']} {sig['confidence']}% - ALERT_CHAT_ID not set")
-                return True
+            # Only send if confidence increased by at least 5% or it's a new alert
+            if sig["confidence"] > last_conf + 5 or last_conf == 0:
+                last_alert_time[coin] = now
+                sent_alerts[coin] = sig["confidence"]  # Track last sent confidence
+                
+                return {
+                    "new_alert": True,
+                    "signal": sig,
+                    "coin": coin
+                }
         
         return None
     except Exception as e:
@@ -999,11 +1003,12 @@ async def scan_coin(session, coin, global_data, app):
         return None
 
 async def clean_old_alerts():
-    """FIX 5: Remove alert timestamps older than 24 hours"""
     now = datetime.now().timestamp()
-    expired = [k for k, v in last_alert_time.items() if now - v > 86400]  # 24 hours
+    expired = [k for k, v in last_alert_time.items() if now - v > 86400]
     for k in expired:
         del last_alert_time[k]
+        if k in sent_alerts:
+            del sent_alerts[k]
 
 # ==================== POSITION MONITOR ====================
 async def position_monitor(app):
@@ -1120,7 +1125,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await q.edit_message_text(f"⏳ Executing {sig['symbol']} {sig['bias']} on SoDEX...", reply_markup=back_kb())
         try:
-            # FIX 1: Add timeout to SoDEX execution
             res = await asyncio.wait_for(
                 sodex.place_order(session, sym, sig["bias"], sig["entry"], sig["qty"]),
                 timeout=20
@@ -1468,7 +1472,12 @@ async def main():
     try:
         logging.info("===== LOADING SODEX SYMBOLS =====")
         await load_symbols(shared_session)
-        logging.info(f"===== SYMBOLS COUNT: {len(SYMBOL_IDS)} =====")
+        # FIX 3: Log loaded assets count
+        logging.info(f"===== LOADED {len(SYMBOL_IDS)} SYMBOLS =====")
+        if len(SYMBOL_IDS) > 0:
+            logging.info(f"===== SAMPLE SYMBOLS: {list(SYMBOL_IDS.items())[:5]} =====")
+        else:
+            logging.warning("===== NO SYMBOLS LOADED! Check SoDEX connection =====")
     except Exception as e:
         logging.exception("Unable to load SoDEX symbols")
         if shared_session and not shared_session.closed:
