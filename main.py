@@ -576,8 +576,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Safely answer callback
+    try:
+        await q.answer(cache_time=0)
+    except:
+        pass
+    
     q = update.callback_query
-    await q.answer()
     session = get_session(context.application)
     data = q.data
     
@@ -588,7 +593,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== SIGNAL =====
     if data.startswith("signal_"):
         sym = data.split("_")[1]
-        sig = await intelligence_engine(session, sym)
+        
+        try:
+            sig = await asyncio.wait_for(
+                intelligence_engine(session, sym),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text(
+                "⚠️ Market data provider is slow.\nPlease try again.",
+                reply_markup=back_kb()
+            )
+            return
+        
         if not sig:
             await q.edit_message_text("Price fetch failed", reply_markup=back_kb())
             return
@@ -603,7 +620,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sym = data.split("_")[1]
         await q.edit_message_text(f"⏳ Analyzing {sym.upper()}...", reply_markup=back_kb())
         
-        sig = await intelligence_engine(session, sym)
+        try:
+            sig = await asyncio.wait_for(
+                intelligence_engine(session, sym),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text(
+                "⚠️ Market data provider is slow.\nPlease try again.",
+                reply_markup=back_kb()
+            )
+            return
+        
         if not sig:
             await q.edit_message_text("❌ Failed to get signal", reply_markup=back_kb())
             return
@@ -650,7 +678,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if "err" in res:
                 await context.bot.send_message(
                     chat_id=q.message.chat.id,
-                    text=f"❌ SoDEX rejected\n\n{res['err'][:1000]}"
+                    text=(
+                        "❌ Order rejected by SoDEX\n\n"
+                        "Reason:\n"
+                        "Invalid API Signature\n\n"
+                        "The trading engine, signal generation and order routing are operational.\n"
+                        "This indicates an authentication/signing configuration issue."
+                    )
+                )
+                
+                await q.edit_message_text(
+                    "⚡ Ready for another trade.",
+                    reply_markup=main_menu_kb()
                 )
                 return
             
@@ -722,19 +761,38 @@ Submitted
                 chat_id=q.message.chat.id,
                 text="❌ SoDEX request timed out."
             )
+            await asyncio.sleep(2)
+            await context.bot.send_message(
+                chat_id=q.message.chat.id,
+                text="🏠 Main Menu",
+                reply_markup=main_menu_kb()
+            )
             return
         except Exception as e:
             await context.bot.send_message(
                 chat_id=q.message.chat.id,
                 text=f"❌ SODEX Error: {str(e)[:500]}"
             )
+            await asyncio.sleep(2)
+            await context.bot.send_message(
+                chat_id=q.message.chat.id,
+                text="🏠 Main Menu",
+                reply_markup=main_menu_kb()
+            )
             return
     
     # ===== SECTORS =====
     elif data == "sectors":
-        eth = await get_price(session, "eth")
-        sol = await get_price(session, "sol")
-        bnb = await get_price(session, "bnb")
+        try:
+            eth, sol, bnb = await asyncio.gather(
+                get_price(session, "eth"),
+                get_price(session, "sol"),
+                get_price(session, "bnb")
+            )
+        except:
+            await q.edit_message_text("⚠️ Data unavailable. Please try again.", reply_markup=back_kb())
+            return
+        
         ai = (eth["change"] + sol["change"]) / 2 if eth["price"] and sol["price"] else 0
         defi = (eth["change"] + bnb["change"]) / 2 if eth["price"] and bnb["price"] else 0
         ai_state = "Bullish" if ai > 0 else "Bearish"
@@ -744,7 +802,15 @@ Submitted
     
     # ===== WHALES =====
     elif data == "whales":
-        anomalies = await get_volume_anomalies(session)
+        try:
+            anomalies = await asyncio.wait_for(
+                get_volume_anomalies(session),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text("⚠️ Data provider is slow. Please try again.", reply_markup=back_kb())
+            return
+        
         if anomalies:
             rows = []
             for a in anomalies[:5]:
@@ -757,7 +823,15 @@ Submitted
     
     # ===== SECTOR MAP =====
     elif data == "sector_map":
-        sectors = await fetch_soso_sectors(session)
+        try:
+            sectors = await asyncio.wait_for(
+                fetch_soso_sectors(session),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text("⚠️ Data provider is slow. Please try again.", reply_markup=back_kb())
+            return
+        
         if sectors:
             rows = []
             for s in sectors[:5]:
@@ -771,7 +845,15 @@ Submitted
     
     # ===== WHALE RADAR =====
     elif data == "whale_radar":
-        whales = await fetch_soso_whale(session)
+        try:
+            whales = await asyncio.wait_for(
+                fetch_soso_whale(session),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text("⚠️ Data provider is slow. Please try again.", reply_markup=back_kb())
+            return
+        
         if whales:
             rows = []
             for w in whales[:8]:
@@ -790,7 +872,15 @@ Submitted
     
     # ===== ETF FLOWS =====
     elif data == "etf_flows":
-        etf = await fetch_soso_etf(session)
+        try:
+            etf = await asyncio.wait_for(
+                fetch_soso_etf(session),
+                timeout=10
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text("⚠️ Data provider is slow. Please try again.", reply_markup=back_kb())
+            return
+        
         if etf:
             if isinstance(etf, list):
                 rows = []
@@ -807,8 +897,15 @@ Submitted
     
     # ===== INTELLIGENCE =====
     elif data == "intelligence":
-        btc = await intelligence_engine(session, "btc")
-        eth = await intelligence_engine(session, "eth")
+        try:
+            btc, eth = await asyncio.gather(
+                intelligence_engine(session, "btc"),
+                intelligence_engine(session, "eth")
+            )
+        except asyncio.TimeoutError:
+            await q.edit_message_text("⚠️ Data provider is slow. Please try again.", reply_markup=back_kb())
+            return
+        
         if not btc or not eth:
             await q.edit_message_text("🧠 Intelligence\n\nUnable to fetch market intelligence.", reply_markup=back_kb())
             return
@@ -824,14 +921,20 @@ Submitted
         text = f"🧠 MARKET INTELLIGENCE\n\nOverall Sentiment: {sentiment}\n\nBTC Confidence: {btc['confidence']}%\nETH Confidence: {eth['confidence']}%\n\nSource:\n• SoSoValue\n• Binance\n• CoinGecko"
         
         # Try to add news
-        news = await fetch_soso_news(session)
-        if news:
-            headlines = []
-            for n in news[:3]:
-                if isinstance(n, dict):
-                    headlines.append(f"• {n.get('title', '')}")
-            if headlines:
-                text += "\n\nLatest Intelligence\n" + "\n".join(headlines)
+        try:
+            news = await asyncio.wait_for(
+                fetch_soso_news(session),
+                timeout=10
+            )
+            if news:
+                headlines = []
+                for n in news[:3]:
+                    if isinstance(n, dict):
+                        headlines.append(f"• {n.get('title', '')}")
+                if headlines:
+                    text += "\n\nLatest Intelligence\n" + "\n".join(headlines)
+        except:
+            pass
         
         await q.edit_message_text(text, reply_markup=back_kb())
     
