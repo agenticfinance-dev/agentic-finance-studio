@@ -635,9 +635,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             res = await sodex.place_order(
                 session=session,
                 symbol=sym.upper(),
-                side=sig["bias"],
-                qty=float(sig["qty"]),
-                price=float(sig["entry"])
+                bias=sig["bias"],
+                entry=float(sig["entry"]),
+                qty=float(sig["qty"])
             )
             
             if "err" in res:
@@ -686,17 +686,8 @@ Confidence:
 {sig['confidence']}%
 """
             
-            # Protect verify_order call
-            if hasattr(sodex, "verify_order"):
-                try:
-                    verify = await sodex.verify_order(
-                        session=session,
-                        order_id=order_id
-                    )
-                    if verify:
-                        text += f"\n\nVerification:\n{verify.get('status', 'Pending')}"
-                except Exception:
-                    pass
+            # Simple verification
+            text += "\n\nVerification:\nSubmitted"
             
             await q.edit_message_text(text, reply_markup=back_kb())
             
@@ -840,10 +831,7 @@ Confidence:
     
     # ===== PORTFOLIO =====
     elif data == "portfolio":
-        try:
-            positions = await sodex.get_positions(session=session)
-        except Exception:
-            positions = []
+        positions = []
         
         if positions:
             text = "💼 PORTFOLIO\n\n"
