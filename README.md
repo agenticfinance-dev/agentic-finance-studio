@@ -88,23 +88,25 @@ Fallback sources:
 CoinGecko
 Binance
 The system automatically switches sources when necessary.
+
 2. Signal Engine
 Built with asynchronous Python architecture.
 Features:
 
- ✅ Technical analysis processing
+  ✅ Technical analysis processing
 
- ✅ Confidence scoring
+  ✅ Confidence scoring
 
- ✅ ATR-based risk management
+  ✅ ATR-based risk management
 
- ✅ Dynamic Entry / TP / SL calculation
+  ✅ Dynamic Entry / TP / SL calculation
 
- ✅ Trend confirmation
+  ✅ Trend confirmation
 
- ✅ Signal explanation
+  ✅ Signal explanation
 
-4. Telegram Delivery Layer
+3. Telegram Delivery Layer
+
 The user interface is built around Telegram.
 Features:
 Interactive buttons
@@ -212,7 +214,9 @@ Reasoning:
 Source:
 SoSoValue + CoinGecko
 
+
 ⚙️ Execution Layer Status
+
 
 Agentic Finance Studio includes a complete trading execution workflow through SoDEX integration.
 Implemented:
