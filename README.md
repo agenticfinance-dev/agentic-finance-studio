@@ -346,11 +346,11 @@ Trading cryptocurrencies involves risk. Users should perform their own research.
 
 🤖 Telegram Bot
 
-https://t.me/AgenticFinanceBot⁠�
+https://t.me/AgenticFinanceBot
 
 💻 GitHub Repository
 
-https://github.com/fxscalpersignals/agentic-finance-studio⁠�
+https://github.com/fxscalpersignals/agentic-finance-studio
 
 🎥 Demo Video
 
