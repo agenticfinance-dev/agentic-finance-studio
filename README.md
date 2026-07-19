@@ -92,17 +92,17 @@ The system automatically switches sources when necessary.
 Built with asynchronous Python architecture.
 Features:
 
-✅ Technical analysis processing
+ ✅ Technical analysis processing
 
-✅ Confidence scoring
+ ✅ Confidence scoring
 
-✅ ATR-based risk management
+ ✅ ATR-based risk management
 
-✅ Dynamic Entry / TP / SL calculation
+ ✅ Dynamic Entry / TP / SL calculation
 
-✅ Trend confirmation
+ ✅ Trend confirmation
 
-✅ Signal explanation
+ ✅ Signal explanation
 
 4. Telegram Delivery Layer
 The user interface is built around Telegram.
@@ -218,10 +218,15 @@ Agentic Finance Studio includes a complete trading execution workflow through So
 Implemented:
 
 ✅ Signal generation
+
 ✅ Risk calculation
+
 ✅ Position sizing
+
 ✅ Order preparation
+
 ✅ Order routing logic
+
 ✅ Execution handling
 
 Current limitation:
