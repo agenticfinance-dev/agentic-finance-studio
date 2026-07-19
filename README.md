@@ -91,13 +91,20 @@ The system automatically switches sources when necessary.
 2. Signal Engine
 Built with asynchronous Python architecture.
 Features:
+
 ✅ Technical analysis processing
+
 ✅ Confidence scoring
+
 ✅ ATR-based risk management
+
 ✅ Dynamic Entry / TP / SL calculation
+
 ✅ Trend confirmation
+
 ✅ Signal explanation
-3. Telegram Delivery Layer
+
+4. Telegram Delivery Layer
 The user interface is built around Telegram.
 Features:
 Interactive buttons
@@ -137,26 +144,39 @@ Private credentials never hardcoded
 Market Intelligence
 
 ✅ Multi-source price engine
+
 ✅ Institutional sentiment integration
+
 ✅ Sector intelligence
+
 ✅ ETF flow monitoring
+
 ✅ Whale radar
 
 Signal Intelligence
 
 ✅ LONG / SHORT detection
+
 ✅ Confidence scoring
+
 ✅ RSI analysis
+
 ✅ EMA trend filtering
+
 ✅ ATR volatility calculation
+
 ✅ Dynamic risk management
 
 Automation
 
 ✅ Background market scanner
+
 ✅ Smart alerts
+
 ✅ Rate limiting
+
 ✅ API fallback protection
+
 ✅ Response caching
 
 📈 Example Signal Output
