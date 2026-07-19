@@ -354,11 +354,11 @@ https://github.com/fxscalpersignals/agentic-finance-studio
 
 🎥 Demo Video
 
-https://www.youtube.com/watch?v=ZIa7NCarmWU⁠�
+https://www.youtube.com/watch?v=ZIa7NCarmWU
 
 🌐 Live System Health
 
-https://agentic-finance-studio.onrender.com/health⁠�
+https://agentic-finance-studio.onrender.com/health
 
 👨‍💻 Developer
 
