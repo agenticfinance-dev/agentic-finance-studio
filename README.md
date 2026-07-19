@@ -19,13 +19,21 @@ Instead of providing raw data, the system converts market information into a str
 💡 What It Does
 
 Agentic Finance Studio provides:
+
 📊 Market Intelligence
+
 BTC, ETH, BNB, XRP, and SOL monitoring
+
 Multi-source price aggregation
+
 Institutional sentiment integration
+
 Sector intelligence overview
+
 ETF flow awareness
+
 Whale activity monitoring
+
 🧠 AI Signal Engine
 The signal engine evaluates:
 SoSoValue sentiment intelligence
@@ -35,7 +43,9 @@ ATR-based volatility measurement
 Volume spike detection
 Confidence scoring
 Risk-to-reward calculation
+
 Each signal provides:
+
 Market bias (LONG / SHORT / NEUTRAL)
 Entry zone
 Take Profit
