@@ -1,4 +1,4 @@
-3🚀 Agentic Finance Studio
+🚀 Agentic Finance Studio
 
 Institutional Intelligence → Risk-Managed Crypto Signals → Execution Ready
 Agentic Finance Studio is an AI-powered Telegram crypto intelligence platform designed to transform fragmented market information into structured, actionable trading insights.
